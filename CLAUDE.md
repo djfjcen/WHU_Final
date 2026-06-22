@@ -52,5 +52,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 性能分以 `gcc -O2` 生成代码运行时间为基准（`min(1, 基准/实际)` 封顶），故后端优化收益明显。
 - 时间限制：功能测试 1s，性能测试 20s（生成代码运行时限，非编译时限；编译时间宽松、编译器自身效率不影响评分）。
 
+## 开发环境 / 工具链
+
+- 已确定使用 **C++20**，构建系统 **CMake 4.0.3**。
+- 本地开发若缺少 CMake，按以下方式自动安装（与 OJ 版本对齐）：
+  ```bash
+  pip3 install cmake==4.0.3
+  ```
+  安装后确保 `cmake --version` 显示 `4.0.3`。
+- 构建命令统一使用：
+  ```bash
+  cmake -S . -B build
+  cmake --build build -j
+  ctest --test-dir build --output-on-failure
+  ```
+
 ## 开发流程
 对照本 CLAUDE.md 和 docs 中的设计，领取分工，之后开始按模块实现
