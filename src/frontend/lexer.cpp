@@ -28,7 +28,8 @@ TokenType lookup_keyword(const std::string& word) {
 
 }  // namespace
 
-Lexer::Lexer(std::istream& input) : input_(input) {
+Lexer::Lexer(std::istream& input, DiagnosticEngine& diagnostics)
+    : input_(input), diagnostics_(diagnostics) {
     advance();
 }
 
@@ -51,9 +52,10 @@ Token Lexer::make_token(TokenType type, std::string lexeme, std::uint32_t line,
     return Token{type, std::move(lexeme), line, column};
 }
 
-void Lexer::set_error(std::string message) {
+void Lexer::set_error(SourceLoc loc, std::string message) {
     if (!error_message_) {
-        error_message_ = std::move(message);
+        error_message_ = message;
+        diagnostics_.error(DiagnosticStage::Lex, loc, message);
     }
 }
 
@@ -95,7 +97,7 @@ void Lexer::skip_whitespace_and_comments() {
                 advance();
             }
             if (!closed) {
-                set_error("unterminated block comment");
+                set_error(SourceLoc{line_, column_}, "unterminated block comment");
                 return;
             }
             continue;
@@ -132,7 +134,7 @@ Token Lexer::scan_number(bool leading_minus) {
     }
 
     if (eof_) {
-        set_error("invalid number literal");
+        set_error(SourceLoc{start_line, start_column}, "invalid number literal");
         return make_token(TokenType::INVALID, lexeme, start_line, start_column);
     }
 
@@ -145,7 +147,7 @@ Token Lexer::scan_number(bool leading_minus) {
             advance();
         }
     } else {
-        set_error("invalid number literal");
+        set_error(SourceLoc{start_line, start_column}, "invalid number literal");
         return make_token(TokenType::INVALID, lexeme, start_line, start_column);
     }
 
@@ -258,7 +260,7 @@ Token Lexer::next_token() {
             return current_;
         case '/':
             if (!eof_ && (peek_char_ == '/' || peek_char_ == '*')) {
-                set_error("unexpected comment start inside token");
+                set_error(SourceLoc{start_line, start_column}, "unexpected comment start inside token");
                 current_ = make_token(TokenType::INVALID, "/", start_line, start_column);
             } else {
                 current_ = make_token(TokenType::DIV, "/", start_line, start_column);
@@ -269,7 +271,7 @@ Token Lexer::next_token() {
                 advance();
                 current_ = make_token(TokenType::AND, "&&", start_line, start_column);
             } else {
-                set_error("unexpected character '&'");
+                set_error(SourceLoc{start_line, start_column}, "unexpected character '&'");
                 current_ = make_token(TokenType::INVALID, "&", start_line, start_column);
             }
             return current_;
@@ -278,12 +280,13 @@ Token Lexer::next_token() {
                 advance();
                 current_ = make_token(TokenType::OR, "||", start_line, start_column);
             } else {
-                set_error("unexpected character '|'");
+                set_error(SourceLoc{start_line, start_column}, "unexpected character '|'");
                 current_ = make_token(TokenType::INVALID, "|", start_line, start_column);
             }
             return current_;
         default:
-            set_error(std::string("unexpected character '") + ch + "'");
+            set_error(SourceLoc{start_line, start_column},
+                      std::string("unexpected character '") + ch + "'");
             current_ = make_token(TokenType::INVALID, std::string(1, ch), start_line, start_column);
             return current_;
     }

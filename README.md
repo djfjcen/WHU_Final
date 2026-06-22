@@ -6,71 +6,91 @@ ToyC → RISC-V32 编译器。武汉大学编译原理课程实践项目。
 
 ## 现状
 
-开发中。已完成架构设计（见[设计文档](docs/superpowers/specs/2026-06-22-toyc-compiler-design.md)），代码骨架待落地。
+- **前端（M1）**：手写 Lexer / Parser / AST 已完成，支持 `-dump-tokens`、`-dump-ast`
+- **语义 / IR / 代码生成**：开发中
+
+架构设计见 [设计文档](docs/superpowers/specs/2026-06-22-toyc-compiler-design.md)。
 
 ## 技术栈
 
 - 语言：C++20
-- 构建：CMake (4.0.3)
+- 构建：CMake 4.x
 - 前端：手写递归下降 lexer / parser（无外部依赖）
 - 目标：RISC-V32 (RV32IM)
 
 ## 接口契约
 
 - 从 **stdin** 读 ToyC 源程序，向 **stdout** 输出 RISC-V32 汇编。
+- 诊断与调试信息输出到 **stderr**。
+- 可执行文件名：**`toyc-compiler`**
 - 命令行参数：
   - `-opt`：开启优化 pass（性能测试时评测器会传入）。
-  - `-dump-tokens` / `-dump-ast` / `-dump-ir` / `-dump-asm`：输出各阶段中间产物到 stderr（调试用）。
-- 程序结果以 `main` 的返回值（进程退出码，0–255）为准。
+  - `-dump-tokens` / `-lex`：输出 Token 流到 stderr。
+  - `-dump-ast`：输出 AST 到 stderr。
+  - `-dump-ir` / `-dump-asm`：预留，由后端阶段实现。
 
 ## 构建
 
-```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+```powershell
+cmake -S . -B build
+cmake --build build --config Debug
 ```
+
+Release：`cmake --build build --config Release`
 
 ## 使用
 
-```sh
-# 编译 ToyC 源文件为汇编
-./build/compiler < input.tc > output.s
+```powershell
+# 词法调试
+build\Debug\toyc-compiler.exe -dump-tokens < test\sample.tc
 
-# 开启优化
-./build/compiler -opt < input.tc > output.s
+# 语法 + AST 调试
+build\Debug\toyc-compiler.exe -dump-ast < test\sample.tc
+
+# 正式编译（代码生成完成后）
+build\Debug\toyc-compiler.exe < input.tc > output.s
+build\Debug\toyc-compiler.exe -opt < input.tc > output.s
 ```
 
 ## 测试
 
-采用 **Oracle 对照法**：ToyC 源可被 gcc 直接编译且语义等价，故将本编译器产出汇编运行后的退出码，与 gcc 编译同一源文件的退出码逐一比对，作为功能正确性的金标准。
+### Parser 回归（CTest）
 
-```sh
-# 示例（需 RISC-V 工具链，如 riscv32-unknown-elf-gcc + qemu-riscv32）
-# 回归脚本见 test/（开发中）
+```powershell
+cmake --build build --config Debug
+ctest --test-dir build -C Debug -R parser_regression
 ```
 
-## 项目结构（规划）
+或：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File test/regression/parser/run_tests.ps1
+```
+
+### Oracle 对照（全链路，开发中）
+
+ToyC 源可被 gcc 直接编译且语义等价，可将本编译器产出汇编的退出码与 gcc 编译结果比对。
+
+## 项目结构
 
 ```
-src/
-  frontend/   词法、语法、AST
-  sema/       符号表、类型检查、常量求值
-  ir/         线性 SSA IR、IRGen、mem2reg
-  opt/        优化 pass（DCE、常量传播、CSE、控制流化简、窥孔等）
-  codegen/    RISC-V 指令选择、栈帧、寄存器分配、汇编输出
-  driver/     main、命令行选项、诊断
-test/         回归用例（.tc 源 + 期望退出码）
-docs/         设计文档
+include/toyc/          公共头文件（Token、Lexer、Parser、AST、Diagnostics）
+src/frontend/          词法、语法、AST、AST 遍历/打印
+src/driver/            main、命令行选项、统一诊断
+test/regression/parser/ Parser 回归用例
+docs/                  设计文档与协作文档
 ```
 
 ## 文档
 
-- [任务要求](任务要求.md) — 权威需求（ToyC 文法、语义约束、接口、评分公式）
-- [设计文档](docs/superpowers/specs/2026-06-22-toyc-compiler-design.md) — 架构、IR、寄存器分配、里程碑、分工
+- [任务要求](任务要求.md) — 权威需求
+- [设计文档](docs/superpowers/specs/2026-06-22-toyc-compiler-design.md) — 架构与分工
+- [前端协作说明](docs/frontend-协作说明.md) — AST 接口、调试方式
+- [词汇翻译表](词汇翻译表.md) — Token / 文法对照
 
 ## 里程碑
 
-1. **M1 端到端打通** — 最小可用管线
+1. **M1 端到端打通** — 前端 + 最简语义 + 最简代码生成（进行中）
 2. **M2 功能正确** — 完整语义与代码生成
-3. **M3 IR + 优化** — 线性 SSA IR + 寄存器分配 + 核心优化
-4. **M4 打磨 + 报告** — 进阶优化与性能调优
+3. **M3 IR + 优化** — SSA IR + 寄存器分配 + 核心优化
+4. **M4 打磨 + 报告**

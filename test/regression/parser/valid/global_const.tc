@@ -1,0 +1,5 @@
+const int LIMIT = 10;
+
+int main() {
+    return LIMIT;
+}

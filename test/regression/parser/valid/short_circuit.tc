@@ -1,0 +1,16 @@
+int side = 0;
+
+int mark(int x) {
+    side = side + 1;
+    return x;
+}
+
+int main() {
+    if (0 && mark(1)) {
+        return 1;
+    }
+    if (1 || mark(2)) {
+        return side;
+    }
+    return 0;
+}

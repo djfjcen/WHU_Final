@@ -1,5 +1,6 @@
 #pragma once
 
+#include "toyc/diagnostics.h"
 #include "toyc/token.h"
 
 #include <istream>
@@ -10,7 +11,7 @@ namespace toyc {
 
 class Lexer {
 public:
-    explicit Lexer(std::istream& input);
+    Lexer(std::istream& input, DiagnosticEngine& diagnostics);
 
     Token next_token();
     const Token& current_token() const { return current_; }
@@ -19,6 +20,7 @@ public:
 
 private:
     std::istream& input_;
+    DiagnosticEngine& diagnostics_;
     Token current_{TokenType::END_OF_FILE, "", 1, 1};
     std::optional<std::string> error_message_;
 
@@ -32,7 +34,7 @@ private:
     Token make_token(TokenType type, std::string lexeme, std::uint32_t line, std::uint32_t column);
     Token scan_identifier_or_keyword();
     Token scan_number(bool leading_minus);
-    void set_error(std::string message);
+    void set_error(SourceLoc loc, std::string message);
 };
 
 }  // namespace toyc
