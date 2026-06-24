@@ -105,7 +105,48 @@ bool constprop(Function& fn) {
     }
     return changed;
 }
-bool dce(Function& /*fn*/) { return false; }
+bool dce(Function& fn) {
+    std::unordered_set<Instruction*> live;
+    std::vector<Instruction*> work;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        for (const std::unique_ptr<Instruction>& inst_owner : owner->insts()) {
+            Instruction* inst = inst_owner.get();
+            Opcode op = inst->opcode();
+            bool essential = (op == Opcode::Store || op == Opcode::Call ||
+                              op == Opcode::Ret || op == Opcode::Br || op == Opcode::CondBr);
+            if (essential) {
+                live.insert(inst);
+                work.push_back(inst);
+            }
+        }
+    }
+    while (!work.empty()) {
+        Instruction* inst = work.back();
+        work.pop_back();
+        for (unsigned k = 0; k < inst->num_operands(); ++k) {
+            Value* op = inst->operand(k);
+            if (!op) continue;  // null operand (e.g. void ret)
+            if (op->value_kind() != ValueKind::Register) continue;  // constants/params/blocks: not instructions
+            // Not all ValueKind::Register are Instructions (e.g. Module::create_register)
+            // Check if it's actually an instruction by checking if it has an opcode (Instructions do)
+            Instruction* def = dynamic_cast<Instruction*>(op);
+            if (!def) continue;  // skip non-instruction registers
+            if (!live.count(def)) {
+                live.insert(def);
+                work.push_back(def);
+            }
+        }
+    }
+    std::unordered_set<Instruction*> dead;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        for (const std::unique_ptr<Instruction>& inst_owner : owner->insts()) {
+            if (!live.count(inst_owner.get())) dead.insert(inst_owner.get());
+        }
+    }
+    if (dead.empty()) return false;
+    erase_dead(fn, dead);
+    return true;
+}
 bool gvn(Function& /*fn*/) { return false; }
 bool cfs(Function& /*fn*/) { return false; }
 

@@ -452,6 +452,38 @@ void test_constprop_skips_div_zero() {
     toyc::test::check(entry->insts().size() == 2, "cp: div preserved");
 }
 
+void test_dce_removes_dead_compute() {
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    Value* a = m.create_register(Type::I32);
+    Value* b = m.create_register(Type::I32);
+    entry->push_back(std::make_unique<BinaryInst>(Opcode::Add, a, b, m.fresh_id()));  // dead
+    entry->push_back(std::make_unique<RetInst>(m.get_constant(0)));
+
+    bool changed = dce(*f);
+    toyc::test::check(changed, "dce: changed");
+    toyc::test::check(entry->insts().size() == 1, "dce: only ret remains");
+    toyc::test::check(entry->terminator()->opcode() == Opcode::Ret, "dce: ret kept");
+}
+
+void test_dce_keeps_live_chain() {
+    // add feeds ret -> live; unused mul -> dead.
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    Value* a = m.create_register(Type::I32);
+    Value* b = m.create_register(Type::I32);
+    auto add = std::make_unique<BinaryInst>(Opcode::Add, a, b, m.fresh_id());
+    Instruction* add_raw = add.get();
+    entry->push_back(std::move(add));
+    entry->push_back(std::make_unique<BinaryInst>(Opcode::Mul, a, b, m.fresh_id()));  // dead
+    entry->push_back(std::make_unique<RetInst>(add_raw));
+
+    dce(*f);
+    toyc::test::check(entry->insts().size() == 2, "dce: add+ret kept, mul gone");
+}
+
 }  // namespace
 
 int main() {
@@ -471,5 +503,7 @@ int main() {
     test_constprop_folds_binary();
     test_constprop_propagates_chain();
     test_constprop_skips_div_zero();
+    test_dce_removes_dead_compute();
+    test_dce_keeps_live_chain();
     return toyc::test::report();
 }
