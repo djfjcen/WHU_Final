@@ -1,5 +1,8 @@
 #include "toyc/ast_printer.h"
 #include "toyc/diagnostics.h"
+#include "toyc/ir.h"
+#include "toyc/ir_printer.h"
+#include "toyc/irgen.h"
 #include "toyc/lexer.h"
 #include "toyc/options.h"
 #include "toyc/parser.h"
@@ -49,8 +52,18 @@ int run_frontend(toyc::CompilerOptions options) {
         return 0;
     }
 
+    if (options.dump_ir) {
+        std::unique_ptr<toyc::Module> ir = toyc::generate(*unit, diagnostics);
+        if (diagnostics.has_errors() || !ir) {
+            diagnostics.emit_all(std::cerr);
+            return 1;
+        }
+        toyc::print_module(*ir, std::cerr);
+        return 0;
+    }
+
     diagnostics.error(toyc::DiagnosticStage::Driver, toyc::SourceLoc{0, 0},
-                      "codegen not implemented yet; use -dump-ast or -dump-tokens");
+                      "codegen not implemented yet; use -dump-ast, -dump-tokens, or -dump-ir");
     diagnostics.emit_all(std::cerr);
     return 1;
 }

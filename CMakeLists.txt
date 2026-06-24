@@ -19,6 +19,7 @@ add_executable(toyc-compiler
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
+    src/ir/irgen.cpp
 )
 
 target_include_directories(toyc-compiler PRIVATE include)
@@ -52,4 +53,11 @@ endif()
 add_test(
     NAME ir_tests
     COMMAND toyc-ir-tests
+)
+
+add_test(
+    NAME irgen_regression
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMPILER=$<TARGET_FILE:toyc-compiler>
+        -P ${CMAKE_SOURCE_DIR}/test/regression/irgen/run_irgen.cmake
 )

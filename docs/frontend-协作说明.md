@@ -183,3 +183,7 @@ public:
     }
 };
 ```
+
+### 12.4 ⚠️ `ValueKind` 命名冲突待解决（2026-06-24，需前端组处理）
+
+`ast_contract.h` 的 `ValueKind { Int, Void }` 与 `ir.h` 的 `ValueKind { Constant, ... }` 同名冲突（同 `namespace toyc`），任何同时 include 两者的翻译单元编译失败。**请前端组把 `ast_contract.h::ValueKind` 改名（建议 `ValueType`）** —— `ir.h::ValueKind` 已被 IR 全模块使用，不宜改。详见 [`IR-Sema接口请求反馈.md`](./IR-Sema接口请求反馈.md) §8。此问题阻塞 Sema↔IR 集成。

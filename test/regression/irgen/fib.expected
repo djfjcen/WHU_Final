@@ -1,0 +1,25 @@
+define i32 @fib(i32 %arg.0) {
+entry:
+  %v.0 = alloca i32
+  store %v.0, %arg.0
+  %v.1 = load %v.0
+  %v.2 = icmp slt %v.1, 2
+  cond_br %v.2, label bb1, label bb2
+bb1:
+  %v.3 = load %v.0
+  ret %v.3
+bb2:
+  %v.4 = load %v.0
+  %v.5 = sub %v.4, 1
+  %v.6 = call @fib, %v.5
+  %v.7 = load %v.0
+  %v.8 = sub %v.7, 2
+  %v.9 = call @fib, %v.8
+  %v.10 = add %v.6, %v.9
+  ret %v.10
+}
+define i32 @main() {
+entry:
+  %v.11 = call @fib, 10
+  ret %v.11
+}

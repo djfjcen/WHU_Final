@@ -1,0 +1,9 @@
+define i32 @main() {
+entry:
+  %v.0 = icmp slt 1, 2
+  cond_br %v.0, label bb1, label bb2
+bb1:
+  ret 1
+bb2:
+  ret 0
+}

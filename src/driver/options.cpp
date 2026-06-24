@@ -12,6 +12,8 @@ void print_usage(std::ostream& output) {
            << "  -dump-tokens         dump token stream to stderr\n"
            << "  -lex                 alias of -dump-tokens\n"
            << "  -dump-ast            dump AST to stderr\n"
+           << "  -dump-ir             dump IR to stderr\n"
+           << "  -dump-asm            alias of -dump-ir\n"
            << "  -opt                 enable optimizations (reserved)\n";
 }
 
@@ -23,6 +25,8 @@ CompilerOptions parse_options(int argc, char* argv[], DiagnosticEngine& diagnost
             options.dump_tokens = true;
         } else if (arg == "-dump-ast") {
             options.dump_ast = true;
+        } else if (arg == "-dump-ir" || arg == "-dump-asm") {
+            options.dump_ir = true;
         } else if (arg == "-opt") {
             options.opt_mode = true;
         } else {

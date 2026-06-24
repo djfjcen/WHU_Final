@@ -251,6 +251,7 @@ public:
     const std::list<std::unique_ptr<Instruction>>& insts() const { return insts_; }
 
     Instruction* terminator() const { return insts_.empty() ? nullptr : insts_.back().get(); }
+    bool is_terminated() const { const Instruction* t = terminator(); return t && t->is_terminator(); }
 
     const std::vector<BasicBlock*>& preds() const { return preds_; }
     const std::vector<BasicBlock*>& succs() const { return succs_; }
