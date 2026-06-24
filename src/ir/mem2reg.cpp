@@ -1,5 +1,6 @@
 #include "toyc/mem2reg.h"
 
+#include <algorithm>
 #include <cassert>
 #include <utility>
 
@@ -106,8 +107,22 @@ void DominatorTree::analyze(Function& fn) {
             children_[idom_[b]].push_back(b);
         }
     }
-    for (const std::unique_ptr<BasicBlock>& bb : fn.blocks()) {
-        df_[bb.get()];  // ensure every block has a DF entry (filled in Task 2)
+
+    // Dominance frontier (runner algorithm).
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        BasicBlock* b = owner.get();
+        df_[b];
+        if (preds_[b].size() < 2) continue;
+        for (BasicBlock* p : preds_[b]) {
+            BasicBlock* runner = p;
+            while (runner != idom_[b]) {
+                std::vector<BasicBlock*>& d = df_[runner];
+                if (std::find(d.begin(), d.end(), b) == d.end()) {
+                    d.push_back(b);
+                }
+                runner = idom_[runner];
+            }
+        }
     }
 }
 

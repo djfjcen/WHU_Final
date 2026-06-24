@@ -5,6 +5,7 @@
 
 #include "check.h"
 
+#include <algorithm>
 #include <sstream>
 
 using namespace toyc;
@@ -241,6 +242,29 @@ void test_dominator_tree_loop() {
     toyc::test::check(dt.preds(header).size() == 2, "loop: header 2 preds (entry+body)");
 }
 
+void test_dom_frontier() {
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    BasicBlock* header = f->create_block();  // bb1
+    BasicBlock* body = f->create_block();    // bb2
+    BasicBlock* exit = f->create_block();    // bb3
+    entry->push_back(std::make_unique<BrInst>(header));
+    header->push_back(std::make_unique<CondBrInst>(m.get_constant(1), body, exit));
+    body->push_back(std::make_unique<BrInst>(header));
+    exit->push_back(std::make_unique<RetInst>(m.get_constant(0)));
+
+    DominatorTree dt;
+    dt.analyze(*f);
+    auto contains = [](const std::vector<BasicBlock*>& v, BasicBlock* b) {
+        return std::find(v.begin(), v.end(), b) != v.end();
+    };
+    toyc::test::check(contains(dt.dom_frontier(body), header), "df: DF(body) has header");
+    toyc::test::check(contains(dt.dom_frontier(header), header), "df: DF(header) has header");
+    toyc::test::check(dt.dom_frontier(entry).empty(), "df: DF(entry) empty");
+    toyc::test::check(dt.dom_frontier(exit).empty(), "df: DF(exit) empty");
+}
+
 }  // namespace
 
 int main() {
@@ -253,5 +277,6 @@ int main() {
     test_dominator_tree_straight();
     test_dominator_tree_diamond();
     test_dominator_tree_loop();
+    test_dom_frontier();
     return toyc::test::report();
 }
