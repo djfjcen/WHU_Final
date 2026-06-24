@@ -73,3 +73,10 @@ add_test(
         -DCOMPILER=$<TARGET_FILE:toyc-compiler>
         -P ${CMAKE_SOURCE_DIR}/test/regression/sema/run_tests.cmake
 )
+
+add_test(
+    NAME mem2reg_regression
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMPILER=$<TARGET_FILE:toyc-compiler>
+        -P ${CMAKE_SOURCE_DIR}/test/regression/mem2reg/run_mem2reg.cmake
+)

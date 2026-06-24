@@ -3,6 +3,7 @@
 #include "toyc/ir.h"
 #include "toyc/ir_printer.h"
 #include "toyc/irgen.h"
+#include "toyc/mem2reg.h"
 #include "toyc/lexer.h"
 #include "toyc/options.h"
 #include "toyc/parser.h"
@@ -63,6 +64,9 @@ int run_frontend(toyc::CompilerOptions options) {
         if (diagnostics.has_errors() || !ir) {
             diagnostics.emit_all(std::cerr);
             return 1;
+        }
+        if (options.opt_mode) {
+            toyc::mem2reg(*ir);
         }
         toyc::print_module(*ir, std::cerr);
         return 0;

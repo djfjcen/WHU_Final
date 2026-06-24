@@ -1,0 +1,11 @@
+define i32 @main() {
+entry:
+  cond_br 1, label bb1, label bb2
+bb1:
+  br label bb3
+bb2:
+  br label bb3
+bb3:
+  %v.2 = phi [1, bb1], [2, bb2]
+  ret %v.2
+}
