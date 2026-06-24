@@ -1,5 +1,0 @@
-int counter = 42;
-
-int main() {
-    return counter;
-}

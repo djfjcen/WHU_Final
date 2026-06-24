@@ -53,10 +53,8 @@ Token Lexer::make_token(TokenType type, std::string lexeme, std::uint32_t line,
 }
 
 void Lexer::set_error(SourceLoc loc, std::string message) {
-    if (!error_message_) {
-        error_message_ = message;
-        diagnostics_.error(DiagnosticStage::Lex, loc, message);
-    }
+    error_message_ = message;
+    diagnostics_.error(DiagnosticStage::Lex, loc, message);
 }
 
 const std::string& Lexer::error_message() const {
@@ -133,22 +131,14 @@ Token Lexer::scan_number(bool leading_minus) {
         advance();
     }
 
-    if (eof_) {
-        set_error(SourceLoc{start_line, start_column}, "invalid number literal");
-        return make_token(TokenType::INVALID, lexeme, start_line, start_column);
-    }
-
     if (peek_char_ == '0') {
         lexeme.push_back('0');
         advance();
-    } else if (peek_char_ >= '1' && peek_char_ <= '9') {
+    } else {
         while (!eof_ && std::isdigit(static_cast<unsigned char>(peek_char_))) {
             lexeme.push_back(peek_char_);
             advance();
         }
-    } else {
-        set_error(SourceLoc{start_line, start_column}, "invalid number literal");
-        return make_token(TokenType::INVALID, lexeme, start_line, start_column);
     }
 
     return make_token(TokenType::NUMBER, std::move(lexeme), start_line, start_column);
@@ -181,8 +171,7 @@ Token Lexer::next_token() {
     }
 
     if (ch == '-' && !current_.is_operand_suffix()) {
-        if (!eof_ && (input_.peek() == '0' ||
-                      (input_.peek() >= '1' && input_.peek() <= '9'))) {
+        if (input_.peek() == '0' || (input_.peek() >= '1' && input_.peek() <= '9')) {
             current_ = scan_number(true);
             return current_;
         }
@@ -227,7 +216,7 @@ Token Lexer::next_token() {
             current_ = make_token(TokenType::COMMA, ",", start_line, start_column);
             return current_;
         case '=':
-            if (!eof_ && peek_char_ == '=') {
+            if (peek_char_ == '=') {
                 advance();
                 current_ = make_token(TokenType::EQ, "==", start_line, start_column);
             } else {
@@ -235,7 +224,7 @@ Token Lexer::next_token() {
             }
             return current_;
         case '!':
-            if (!eof_ && peek_char_ == '=') {
+            if (peek_char_ == '=') {
                 advance();
                 current_ = make_token(TokenType::NE, "!=", start_line, start_column);
             } else {
@@ -243,7 +232,7 @@ Token Lexer::next_token() {
             }
             return current_;
         case '<':
-            if (!eof_ && peek_char_ == '=') {
+            if (peek_char_ == '=') {
                 advance();
                 current_ = make_token(TokenType::LE, "<=", start_line, start_column);
             } else {
@@ -251,7 +240,7 @@ Token Lexer::next_token() {
             }
             return current_;
         case '>':
-            if (!eof_ && peek_char_ == '=') {
+            if (peek_char_ == '=') {
                 advance();
                 current_ = make_token(TokenType::GE, ">=", start_line, start_column);
             } else {
@@ -259,12 +248,7 @@ Token Lexer::next_token() {
             }
             return current_;
         case '/':
-            if (!eof_ && (peek_char_ == '/' || peek_char_ == '*')) {
-                set_error(SourceLoc{start_line, start_column}, "unexpected comment start inside token");
-                current_ = make_token(TokenType::INVALID, "/", start_line, start_column);
-            } else {
-                current_ = make_token(TokenType::DIV, "/", start_line, start_column);
-            }
+            current_ = make_token(TokenType::DIV, "/", start_line, start_column);
             return current_;
         case '&':
             if (!eof_ && peek_char_ == '&') {

@@ -1,6 +1,0 @@
-const int A = 4;
-int g = A * 3;
-
-int main() {
-    return g;
-}

@@ -1,6 +1,0 @@
-define i32 @main() {
-entry:
-  %v.0 = mul 2, 3
-  %v.1 = add 1, %v.0
-  ret %v.1
-}
