@@ -199,6 +199,8 @@ struct Mem2RegCtx {
     }
 
     AllocaInst* alloca_of(Value* v) const {
+        if (v->value_kind() != ValueKind::Register) return nullptr;
+        if (static_cast<Instruction*>(v)->opcode() != Opcode::Alloca) return nullptr;
         AllocaInst* a = static_cast<AllocaInst*>(v);
         return promotable_set.count(a) ? a : nullptr;
     }

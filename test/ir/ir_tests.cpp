@@ -324,8 +324,6 @@ void test_mem2reg_rename() {
     toyc::test::check(term->opcode() == Opcode::Ret, "rename: merge ends in ret");
     toyc::test::check(term->operand(0)->value_kind() != ValueKind::Register ||
                       term->operand(0) != load_raw, "rename: ret no longer uses old load");
-    bool ret_uses_phi = term->operand(0) != nullptr &&
-                        term->operand(0)->value_kind() == ValueKind::Register;
     // find the phi in merge
     PhiInst* phi = nullptr;
     for (const std::unique_ptr<Instruction>& inst : merge->insts()) {
