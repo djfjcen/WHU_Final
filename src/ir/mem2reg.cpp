@@ -1,6 +1,8 @@
 #include "toyc/mem2reg.h"
 
 #include <algorithm>
+#include <iterator>
+#include <list>
 #include <cassert>
 #include <unordered_map>
 #include <unordered_set>
@@ -261,7 +263,48 @@ struct Mem2RegCtx {
         }
     }
 
-    void cleanup() { /* Task 5 */ }
+    void cleanup() {
+        // Pass 1: erase loads and stores to promotable allocas.
+        for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+            BasicBlock* bb = owner.get();
+            std::list<std::unique_ptr<Instruction>>& insts = bb->insts();
+            for (auto it = insts.begin(); it != insts.end(); ) {
+                Opcode op = (*it)->opcode();
+                bool del = false;
+                if (op == Opcode::Load) {
+                    if (alloca_of((*it)->operand(0))) del = true;
+                } else if (op == Opcode::Store) {
+                    if (alloca_of((*it)->operand(0))) del = true;
+                }
+                it = del ? insts.erase(it) : std::next(it);
+            }
+        }
+        // Pass 2: erase promotable allocas (after all their users are gone).
+        for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+            BasicBlock* bb = owner.get();
+            std::list<std::unique_ptr<Instruction>>& insts = bb->insts();
+            for (auto it = insts.begin(); it != insts.end(); ) {
+                if ((*it)->opcode() == Opcode::Alloca &&
+                    promotable_set.count(static_cast<AllocaInst*>(it->get()))) {
+                    it = insts.erase(it);
+                } else {
+                    it = std::next(it);
+                }
+            }
+        }
+        normalize_phis();
+    }
+
+    void normalize_phis() {
+        for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+            BasicBlock* bb = owner.get();
+            for (const std::unique_ptr<Instruction>& inst : bb->insts()) {
+                if (inst->opcode() != Opcode::Phi) continue;
+                PhiInst* phi = static_cast<PhiInst*>(inst.get());
+                phi->reorder_incoming(dt.preds(bb));
+            }
+        }
+    }
 };
 
 }  // namespace

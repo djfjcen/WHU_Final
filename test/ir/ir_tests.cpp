@@ -334,6 +334,71 @@ void test_mem2reg_rename() {
     toyc::test::check(phi && term->operand(0) == phi, "rename: ret uses phi");
 }
 
+void test_mem2reg_full_ssa() {
+    Module m;
+    Function* f = m.create_function("main", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    BasicBlock* then = f->create_block();
+    BasicBlock* els = f->create_block();
+    BasicBlock* merge = f->create_block();
+
+    auto alloca = std::make_unique<AllocaInst>(m.fresh_id());   // %v.0
+    AllocaInst* a = alloca.get();
+    entry->push_back(std::move(alloca));
+    entry->push_back(std::make_unique<StoreInst>(a, m.get_constant(0)));
+    entry->push_back(std::make_unique<CondBrInst>(m.get_constant(1), then, els));
+    then->push_back(std::make_unique<StoreInst>(a, m.get_constant(1)));
+    then->push_back(std::make_unique<BrInst>(merge));
+    els->push_back(std::make_unique<StoreInst>(a, m.get_constant(2)));
+    els->push_back(std::make_unique<BrInst>(merge));
+    merge->push_back(std::make_unique<LoadInst>(a, m.fresh_id()));  // %v.1
+    LoadInst* load_raw = static_cast<LoadInst*>(merge->insts().back().get());
+    merge->push_back(std::make_unique<RetInst>(load_raw));
+
+    mem2reg(*f);
+
+    // No alloca / load / store to the promoted slot anywhere.
+    int dead = 0;
+    for (const std::unique_ptr<BasicBlock>& bb : f->blocks()) {
+        for (const std::unique_ptr<Instruction>& inst : bb->insts()) {
+            Opcode op = inst->opcode();
+            if (op == Opcode::Alloca || op == Opcode::Load || op == Opcode::Store) ++dead;
+        }
+    }
+    toyc::test::check(dead == 0, "cleanup: no alloca/load/store left");
+
+    // Phi incoming order matches merge's preds order (then, els).
+    DominatorTree dt;
+    dt.analyze(*f);
+    PhiInst* phi = nullptr;
+    for (const std::unique_ptr<Instruction>& inst : merge->insts()) {
+        if (inst->opcode() == Opcode::Phi) { phi = static_cast<PhiInst*>(inst.get()); break; }
+    }
+    const std::vector<BasicBlock*>& preds = dt.preds(merge);
+    toyc::test::check(phi && phi->num_operands() == preds.size(), "normalize: phi arity == preds");
+    bool order_ok = true;
+    for (unsigned i = 0; phi && i < preds.size(); ++i) {
+        if (phi->incoming_blocks()[i] != preds[i]) order_ok = false;
+    }
+    toyc::test::check(order_ok, "normalize: phi incoming == preds order");
+
+    std::ostringstream out;
+    print_module(m, out);
+    std::string expected =
+        "define i32 @main() {\n"
+        "entry:\n"
+        "  cond_br 1, label bb1, label bb2\n"
+        "bb1:\n"
+        "  br label bb3\n"
+        "bb2:\n"
+        "  br label bb3\n"
+        "bb3:\n"
+        "  %v.2 = phi [1, bb1], [2, bb2]\n"
+        "  ret %v.2\n"
+        "}\n";
+    toyc::test::check_eq_str(expected, out.str(), "full ssa print");
+}
+
 }  // namespace
 
 int main() {
@@ -349,5 +414,6 @@ int main() {
     test_dom_frontier();
     test_mem2reg_inserts_phi();
     test_mem2reg_rename();
+    test_mem2reg_full_ssa();
     return toyc::test::report();
 }

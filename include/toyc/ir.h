@@ -209,6 +209,25 @@ public:
     void add_incoming(Value* value, BasicBlock* block);
     const std::vector<BasicBlock*>& incoming_blocks() const { return incoming_blocks_; }
 
+    // Reorder incoming (value,block) pairs to match pred_order. Used by mem2reg
+    // so SSA textual output is byte-stable regardless of rename DFS visit order.
+    void reorder_incoming(const std::vector<BasicBlock*>& pred_order) {
+        std::vector<Value*> vals(pred_order.size(), nullptr);
+        for (unsigned i = 0; i < incoming_blocks_.size(); ++i) {
+            for (unsigned j = 0; j < pred_order.size(); ++j) {
+                if (pred_order[j] == incoming_blocks_[i]) { vals[j] = operands_[i]; break; }
+            }
+        }
+        for (unsigned i = 0; i < operands_.size(); ++i) {
+            if (operands_[i]) operands_[i]->remove_use(this);
+        }
+        operands_.clear();
+        incoming_blocks_.clear();
+        for (unsigned j = 0; j < pred_order.size(); ++j) {
+            add_incoming(vals[j], pred_order[j]);
+        }
+    }
+
 private:
     std::vector<BasicBlock*> incoming_blocks_;
 };
