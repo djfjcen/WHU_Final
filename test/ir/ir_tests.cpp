@@ -2,6 +2,7 @@
 #include "toyc/ir_builder.h"
 #include "toyc/ir_printer.h"
 #include "toyc/mem2reg.h"
+#include "toyc/optim.h"
 
 #include "check.h"
 
@@ -399,6 +400,58 @@ void test_mem2reg_full_ssa() {
     toyc::test::check_eq_str(expected, out.str(), "full ssa print");
 }
 
+void test_constprop_folds_binary() {
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    auto mul = std::make_unique<BinaryInst>(Opcode::Mul, m.get_constant(3), m.get_constant(4), m.fresh_id());
+    Instruction* mul_raw = mul.get();
+    entry->push_back(std::move(mul));
+    entry->push_back(std::make_unique<RetInst>(mul_raw));
+
+    bool changed = constprop(*f);
+    toyc::test::check(changed, "cp: changed");
+    toyc::test::check(entry->insts().size() == 1, "cp: folded mul removed");
+    Instruction* term = entry->terminator();
+    toyc::test::check(term->opcode() == Opcode::Ret, "cp: ret remains");
+    toyc::test::check(term->operand(0)->value_kind() == ValueKind::Constant, "cp: ret operand constant");
+    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 12, "cp: 3*4 == 12");
+}
+
+void test_constprop_propagates_chain() {
+    // mul 3,4 -> 12 exposes add 2,12 -> 14 in one sweep-to-fixpoint.
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    auto mul = std::make_unique<BinaryInst>(Opcode::Mul, m.get_constant(3), m.get_constant(4), m.fresh_id());
+    Instruction* mul_raw = mul.get();
+    auto add = std::make_unique<BinaryInst>(Opcode::Add, m.get_constant(2), mul_raw, m.fresh_id());
+    Instruction* add_raw = add.get();
+    entry->push_back(std::move(mul));
+    entry->push_back(std::move(add));
+    entry->push_back(std::make_unique<RetInst>(add_raw));
+
+    constprop(*f);
+    Instruction* term = entry->terminator();
+    toyc::test::check(term->opcode() == Opcode::Ret, "cp-chain: ret");
+    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 14, "cp-chain: 2+3*4 == 14");
+    toyc::test::check(entry->insts().size() == 1, "cp-chain: only ret left");
+}
+
+void test_constprop_skips_div_zero() {
+    Module m;
+    Function* f = m.create_function("f", FuncRet::Int, 0);
+    BasicBlock* entry = f->create_block();
+    auto div = std::make_unique<BinaryInst>(Opcode::Sdiv, m.get_constant(5), m.get_constant(0), m.fresh_id());
+    Instruction* div_raw = div.get();
+    entry->push_back(std::move(div));
+    entry->push_back(std::make_unique<RetInst>(div_raw));
+
+    bool changed = constprop(*f);
+    toyc::test::check(!changed, "cp: div-by-zero not folded");
+    toyc::test::check(entry->insts().size() == 2, "cp: div preserved");
+}
+
 }  // namespace
 
 int main() {
@@ -415,5 +468,8 @@ int main() {
     test_mem2reg_inserts_phi();
     test_mem2reg_rename();
     test_mem2reg_full_ssa();
+    test_constprop_folds_binary();
+    test_constprop_propagates_chain();
+    test_constprop_skips_div_zero();
     return toyc::test::report();
 }
