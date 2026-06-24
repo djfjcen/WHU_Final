@@ -5,6 +5,7 @@
 #include "toyc/ast_visitor.h"
 #include "toyc/ir.h"
 #include "toyc/ir_builder.h"
+#include "toyc/sema.h"
 
 #include <memory>
 #include <optional>
@@ -24,6 +25,7 @@ struct Symbol {
 class IRGenerator : public ASTVisitor {
 public:
     std::unique_ptr<Module> generate(const CompUnit& unit, DiagnosticEngine& diag);
+    std::unique_ptr<Module> generate(const CompUnit& unit, const SemaResult& sema, DiagnosticEngine& diag);
 
     void visit_comp_unit(const CompUnit& unit) override;
     void visit_global_const(const GlobalConstDecl& decl) override;
@@ -57,10 +59,12 @@ private:
     void pop_scope();
     void declare(const std::string& name, Symbol sym);
     Symbol* resolve(const std::string& name);
+    Symbol* resolve_ref(const SymbolRef& ref);
 
     Value* alloca_in_entry();
 
     DiagnosticEngine* diag_ = nullptr;
+    const SemaResult* sema_ = nullptr;
     std::unique_ptr<Module> module_;
     std::unique_ptr<IRBuilder> builder_;
     BasicBlock* entry_ = nullptr;
@@ -72,10 +76,12 @@ private:
     std::vector<LoopFrame> loops_;
 
     std::vector<std::unordered_map<std::string, Symbol>> scopes_;
+    std::unordered_map<const void*, Symbol> symbols_;
     Value* last_value_ = nullptr;
     bool had_error_ = false;
 };
 
+std::unique_ptr<Module> generate(const CompUnit& unit, const SemaResult& sema, DiagnosticEngine& diag);
 std::unique_ptr<Module> generate(const CompUnit& unit, DiagnosticEngine& diag);
 
 }  // namespace toyc

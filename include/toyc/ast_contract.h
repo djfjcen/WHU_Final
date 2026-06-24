@@ -13,10 +13,10 @@ enum class SymbolStorageKind {
     Param,
 };
 
-enum class ValueKind { Int, Void };
+enum class ValueType { Int, Void };
 
 const char* symbol_storage_kind_name(SymbolStorageKind kind);
-const char* value_kind_name(ValueKind kind);
+const char* value_type_name(ValueType kind);
 
 // Sema / IRGen 可依赖的 AST 生命周期约定（见 docs/IR-Sema接口请求反馈-前端组.md）。
 // - CompUnit 由 unique_ptr 持有，check/analyze/codegen 期间不移动、不重建 AST 子树。

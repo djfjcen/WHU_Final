@@ -6,6 +6,7 @@
 #include "toyc/lexer.h"
 #include "toyc/options.h"
 #include "toyc/parser.h"
+#include "toyc/sema.h"
 
 #include <iostream>
 #include <memory>
@@ -53,7 +54,12 @@ int run_frontend(toyc::CompilerOptions options) {
     }
 
     if (options.dump_ir) {
-        std::unique_ptr<toyc::Module> ir = toyc::generate(*unit, diagnostics);
+        toyc::SemaResult sema = toyc::analyze(*unit, diagnostics);
+        if (diagnostics.has_errors() || !sema.ok) {
+            diagnostics.emit_all(std::cerr);
+            return 1;
+        }
+        std::unique_ptr<toyc::Module> ir = toyc::generate(*unit, sema, diagnostics);
         if (diagnostics.has_errors() || !ir) {
             diagnostics.emit_all(std::cerr);
             return 1;

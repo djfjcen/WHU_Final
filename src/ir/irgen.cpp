@@ -2,6 +2,7 @@
 
 #include "toyc/diagnostics.h"
 #include "toyc/ir_builder.h"
+#include "toyc/sema.h"
 
 #include <memory>
 
@@ -38,6 +39,15 @@ Symbol* IRGenerator::resolve(const std::string& name) {
         }
     }
     return nullptr;
+}
+
+Symbol* IRGenerator::resolve_ref(const SymbolRef& ref) {
+    auto found = symbols_.find(ref.decl);
+    if (found == symbols_.end()) {
+        had_error_ = true;
+        return nullptr;
+    }
+    return &found->second;
 }
 
 std::optional<int> IRGenerator::try_fold(const Expr& expr) const {
@@ -93,22 +103,21 @@ Value* IRGenerator::eval_expr(const Expr& expr) {
 }
 
 void IRGenerator::visit_global_const(const GlobalConstDecl& decl) {
-    auto folded = try_fold(*decl.init);
-    if (!folded) { had_error_ = true; return; }
-    module_->create_global(decl.name, *folded, /*is_const=*/true);
-    declare(decl.name, Symbol{nullptr, *folded});
+    auto found = sema_->const_values.find(&decl);
+    if (found == sema_->const_values.end()) { had_error_ = true; return; }
+    module_->create_global(decl.name, found->second, /*is_const=*/true);
+    symbols_[&decl] = Symbol{nullptr, found->second};
 }
 
 void IRGenerator::visit_global_var(const GlobalVarDecl& decl) {
-    auto folded = try_fold(*decl.init);
-    if (!folded) { had_error_ = true; return; }
-    GlobalVar* gv = module_->create_global(decl.name, *folded, /*is_const=*/false);
-    declare(decl.name, Symbol{gv->addr, std::nullopt});
+    auto found = sema_->const_values.find(&decl);
+    if (found == sema_->const_values.end()) { had_error_ = true; return; }
+    GlobalVar* gv = module_->create_global(decl.name, found->second, /*is_const=*/false);
+    symbols_[&decl] = Symbol{gv->addr, std::nullopt};
 }
 
 void IRGenerator::visit_comp_unit(const CompUnit& unit) {
     func_sigs_ = build_func_signature_map(unit);
-    push_scope();  // global scope
     for (const CompUnit::Item& item : unit.items) {
         if (item.kind == CompUnit::ItemKind::GlobalConst) {
             visit_global_const(item.global_const);
@@ -118,7 +127,6 @@ void IRGenerator::visit_comp_unit(const CompUnit& unit) {
             visit_func_def(item.func_def);
         }
     }
-    pop_scope();
 }
 
 void IRGenerator::visit_func_def(const FuncDef& func) {
@@ -128,45 +136,43 @@ void IRGenerator::visit_func_def(const FuncDef& func) {
     alloca_pt_ = entry_->insts().begin();
     builder_ = std::make_unique<IRBuilder>(*module_, entry_);
     current_ret_ = func.return_type;
-    push_scope();  // function scope (params + top-level locals), sits on the global scope
 
     for (unsigned i = 0; i < func.params.size(); ++i) {
         Value* slot = alloca_in_entry();
         builder_->create_store(slot, fn->param(i));
-        declare(func.params[i].name, Symbol{slot, std::nullopt});
+        symbols_[&func.params[i]] = Symbol{slot, std::nullopt};
     }
 
     walk_block(*func.body, *this);
 
-    pop_scope();
     entry_ = nullptr;
     builder_.reset();
 }
 
 void IRGenerator::visit_block_stmt(const BlockStmt& node) {
-    push_scope();
     walk_block(node, *this);
-    pop_scope();
 }
 void IRGenerator::visit_empty_stmt(const EmptyStmt&) {}
 void IRGenerator::visit_expr_stmt(const ExprStmt& node) { eval_expr(*node.expr); }
 
 void IRGenerator::visit_assign_stmt(const AssignStmt& node) {
-    Symbol* sym = resolve(node.name);
+    auto ref = sema_->assigns.find(&node);
+    if (ref == sema_->assigns.end()) { had_error_ = true; return; }
+    Symbol* sym = resolve_ref(ref->second);
     if (!sym) { had_error_ = true; return; }
     Value* value = eval_expr(*node.value);
     builder_->create_store(sym->addr, value);
 }
 
 void IRGenerator::visit_const_decl_stmt(const ConstDeclStmt& node) {
-    auto folded = try_fold(*node.init);
-    if (!folded) { had_error_ = true; return; }
-    declare(node.name, Symbol{nullptr, *folded});
+    auto found = sema_->const_values.find(&node);
+    if (found == sema_->const_values.end()) { had_error_ = true; return; }
+    symbols_[&node] = Symbol{nullptr, found->second};
 }
 
 void IRGenerator::visit_var_decl_stmt(const VarDeclStmt& node) {
     Value* slot = alloca_in_entry();
-    declare(node.name, Symbol{slot, std::nullopt});
+    symbols_[&node] = Symbol{slot, std::nullopt};
     Value* init = eval_expr(*node.init);
     builder_->create_store(slot, init);
 }
@@ -240,7 +246,9 @@ void IRGenerator::visit_int_literal(const IntLiteralExpr& node) {
 }
 
 void IRGenerator::visit_ident(const IdentExpr& node) {
-    Symbol* sym = resolve(node.name);
+    auto ref = sema_->idents.find(&node);
+    if (ref == sema_->idents.end()) { had_error_ = true; return; }
+    Symbol* sym = resolve_ref(ref->second);
     if (!sym) { had_error_ = true; return; }
     if (sym->const_value) {
         last_value_ = module_->get_constant(*sym->const_value);
@@ -294,8 +302,8 @@ void IRGenerator::visit_call(const CallExpr& node) {
     for (const std::unique_ptr<Expr>& arg : node.args) {
         args.push_back(eval_expr(*arg));
     }
-    auto it = func_sigs_.find(node.callee);
-    bool returns_void = (it != func_sigs_.end()) && (it->second == FuncReturnType::Void);
+    auto it = sema_->calls.find(&node);
+    bool returns_void = (it != sema_->calls.end()) && (it->second->return_type == FuncReturnType::Void);
     last_value_ = builder_->create_call(node.callee, std::move(args), returns_void);
 }
 
@@ -328,14 +336,31 @@ Value* IRGenerator::short_circuit(bool is_and, const Expr& lhs_expr, const Expr&
 }
 
 std::unique_ptr<Module> IRGenerator::generate(const CompUnit& unit, DiagnosticEngine& diag) {
+    SemaResult sema = analyze(unit, diag);
+    if (diag.has_errors() || !sema.ok) {
+        return nullptr;
+    }
+    return generate(unit, sema, diag);
+}
+
+std::unique_ptr<Module> IRGenerator::generate(const CompUnit& unit, const SemaResult& sema, DiagnosticEngine& diag) {
     diag_ = &diag;
+    sema_ = &sema;
     module_ = std::make_unique<Module>();
+    symbols_.clear();
+    scopes_.clear();
+    had_error_ = false;
     visit_comp_unit(unit);
     if (had_error_) {
-        diag.error(DiagnosticStage::Sema, SourceLoc{0, 0}, "IRGen failed (unfoldable constant initializer)");
+        diag.error(DiagnosticStage::Sema, SourceLoc{0, 0}, "IRGen failed (missing SemaResult entry)");
         return nullptr;
     }
     return std::move(module_);
+}
+
+std::unique_ptr<Module> generate(const CompUnit& unit, const SemaResult& sema, DiagnosticEngine& diag) {
+    IRGenerator g;
+    return g.generate(unit, sema, diag);
 }
 
 std::unique_ptr<Module> generate(const CompUnit& unit, DiagnosticEngine& diag) {

@@ -16,6 +16,9 @@ add_executable(toyc-compiler
     src/frontend/ast_printer.cpp
     src/frontend/ast_visitor.cpp
     src/frontend/ast_access.cpp
+    src/sema/sema.cpp
+    src/sema/const_eval.cpp
+    src/sema/symbol_table.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
@@ -60,4 +63,11 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCOMPILER=$<TARGET_FILE:toyc-compiler>
         -P ${CMAKE_SOURCE_DIR}/test/regression/irgen/run_irgen.cmake
+)
+
+add_test(
+    NAME sema_regression
+    COMMAND ${CMAKE_COMMAND}
+        -DCOMPILER=$<TARGET_FILE:toyc-compiler>
+        -P ${CMAKE_SOURCE_DIR}/test/regression/sema/run_tests.cmake
 )

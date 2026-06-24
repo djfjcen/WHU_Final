@@ -201,18 +201,18 @@ IRGen 自建全局符号表 + 块作用域栈 + 常量折叠器。
 
 ---
 
-## 8. ⚠️ 待解决：`ValueKind` 命名冲突（2026-06-24，IR 组提出）
+## 8. ✅ 已解决：`ValueKind` 命名冲突（2026-06-24）
 
-**问题**：`include/toyc/ast_contract.h` 定义 `enum class ValueKind { Int, Void }`，`include/toyc/ir.h` 定义 `enum class ValueKind { Constant, GlobalAddr, BasicBlock, Function, Register, Param }`。两者同在 `namespace toyc` 且同名 —— **任何同时 include 这两个头的翻译单元编译失败**（`redefinition of 'ValueKind'`）。
+**原问题**：`include/toyc/ast_contract.h` 定义 `enum class ValueKind { Int, Void }`，`include/toyc/ir.h` 定义 `enum class ValueKind { Constant, GlobalAddr, BasicBlock, Function, Register, Param }`。两者同在 `namespace toyc` 且同名 —— **任何同时 include 这两个头的翻译单元编译失败**（`redefinition of 'ValueKind'`）。
 
 **发现场景**：IRGen 实现（commit `efa792a`）需同时引用 IR 与前端契约，撞到此冲突。IRGen 已临时规避：不 include `ast_contract.h`（其 `SymbolStorageKind` 在 IRGen 当前实现中用不到，按 YAGNI 去掉）。
 
 **影响**：
 - **Sema 组**未来要用 `ast_contract.h`（`SymbolStorageKind` 在那，见 §4 Q4），与 IR 联编时会再撞 → **阻塞 Sema↔IR 集成**。
 
-**指派（请前端组主责、Sema 组知悉）**：
-- **前端组（分工 1）**：把 `ast_contract.h::ValueKind` 改名，建议 `ValueType`（语义即"值的类型 int/void"）。理由：`ir.h::ValueKind` 已被 IR 全模块广泛引用，改名成本高；`ast_contract.h::ValueKind{Int,Void}` 仅前端契约层使用，改名成本低、影响面小。
-- **Sema 组（分工 2）**：实现时引入 `ast_contract.h` 须留意；待前端改名后即可与 IR 正常联编。
-- 改名完成后，IR 组移除 IRGen 的临时规避（重新 include `ast_contract.h` 以使用 `SymbolStorageKind`）。
+**解决方式**：
+- 已将 `ast_contract.h::ValueKind` 改名为 `ValueType`。
+- 已将 `value_kind_name()` 改名为 `value_type_name()`。
+- Sema 与 IRGen 现在可以同时包含 `ast_contract.h` 与 `ir.h`。
 
-**状态**：⚠️ 未解决，阻塞 Sema↔IR 集成。详见 commit `efa792a` 及 `include/toyc/irgen.h`。
+**状态**：✅ 已解决，Sema↔IR 集成不再被该命名冲突阻塞。

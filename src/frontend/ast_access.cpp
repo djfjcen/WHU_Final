@@ -19,11 +19,11 @@ const char* symbol_storage_kind_name(SymbolStorageKind kind) {
     return "Unknown";
 }
 
-const char* value_kind_name(ValueKind kind) {
+const char* value_type_name(ValueType kind) {
     switch (kind) {
-        case ValueKind::Int:
+        case ValueType::Int:
             return "int";
-        case ValueKind::Void:
+        case ValueType::Void:
             return "void";
     }
     return "unknown";
