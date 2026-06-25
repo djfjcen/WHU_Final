@@ -1,6 +1,7 @@
 # Codegen IR 输入契约
 
 日期：2026-06-24  
+更新：2026-06-25，补充 mem2reg / optim 后的 SSA 输入形态。
 范围：描述 codegen 消费 `toyc::Module` 时可依赖的 IR 形态。本文件是参考契约，不是 codegen 实施计划。
 
 ## 输入来源
@@ -76,13 +77,17 @@ for (const auto& function : module.functions()) {
 | 路径 | 输入 | 输出 |
 |---|---|---|
 | 整程序求值 | AST + `SemaResult`，或 `Module` | 常量返回汇编 |
-| 常规后端 | 优化前/后的 `Module` | 完整 RV32IM 汇编 |
+| 常规后端 | raw / mem2reg / optim 后的 `Module` | 完整 RV32IM 汇编 |
 
 常规后端仍必须存在，作为求值失败、调试和报告说明的 fallback。
 
 ## 当前 IR 阶段形态
 
-当前 IRGen 产物是非 SSA 栈式 IR：
+当前有三种可观察 IR 层级。
+
+### Raw IRGen
+
+`IRGen` 产物是非 SSA 栈式 IR：
 
 - 每个参数和局部变量都有 `alloca i32` 栈槽。
 - 参数在 `entry` 开头被 `store` 到自己的栈槽。
@@ -90,6 +95,30 @@ for (const auto& function : module.functions()) {
 - 常量引用会被内联成 `ConstantInt`。
 - 全局变量引用通过 `GlobalAddr` 做 `load`/`store`。
 - 短路表达式已经变成基本块、条件跳转和临时栈槽。
+
+默认非 `-opt` codegen 可先消费这一层，保证功能正确。
+
+### Mem2Reg IR
+
+`mem2reg(Module&)` 会：
+
+- 删除可提升局部/参数槽的 `alloca/load/store`。
+- 把变量当前值重写为 SSA value。
+- 在控制流汇合处插入 `PhiInst`。
+- 保留全局变量对应的 `GlobalAddr` load/store。
+
+`-dump-ir -mem2reg-only` 可查看该层。codegen 若要消费这一层，必须支持 `Phi` 或先做 deSSA。
+
+### Optim IR
+
+`run_optim(Module&)` 当前在 mem2reg 后运行，包含：
+
+- 常量传播 / 常量折叠。
+- DCE。
+- GVN / CSE。
+- CFG simplify。
+
+`-dump-ir -opt` 可查看该层。优化后 IR 仍是 SSA 风格，可能包含 `Phi`，也可能删除 alloca、load/store、空块或常量条件分支。`-opt` codegen 最终应消费这一层；在 deSSA 未落地前，可以临时诊断失败或暂时让 `-opt` 走 raw codegen，但 plan 中应把这当作过渡状态。
 
 IR 类型系统已预留 `Phi/Shl/Shr`。后续优化落地后，codegen 还需要支持 SSA 形态或在 codegen 内部做 deSSA。
 
@@ -179,7 +208,8 @@ codegen 建议先把 `Value*` 分为几类：
 
 ## 需要 codegen 自己决定的边界
 
-- 是否第一版直接翻译非 SSA 栈式 IR，还是先引入 deSSA/寄存器分配框架。
+- 默认路径是否直接翻译非 SSA 栈式 IR。
+- `-opt` 路径是在 codegen 前做 deSSA，还是 codegen 内部边 lowering 边处理 phi。
 - `alloca` 栈槽、spill 栈槽、保存寄存器区域、出参区域如何统一布局。
 - 调用前后 caller-saved/callee-saved 寄存器如何保存。
 - `main` 返回采用普通 `ret` 还是 exit syscall。
