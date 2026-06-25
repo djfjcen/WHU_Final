@@ -49,6 +49,9 @@ emit-asm file=sample: build
 oracle-codegen: build
     test/codegen/run_codegen_oracle.sh
 
+oracle-codegen-docker:
+    test/codegen/run_codegen_oracle_docker.sh
+
 coverage: configure-coverage
     cmake --build {{build_dir}} --target coverage
 

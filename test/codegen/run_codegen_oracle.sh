@@ -2,7 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-compiler="${repo_root}/build/toyc-compiler"
+build_dir="${TOYC_BUILD_DIR:-build}"
+compiler="${repo_root}/${build_dir}/toyc-compiler"
 cases_dir="${repo_root}/test/codegen/cases"
 work_dir="${TMPDIR:-/tmp}/toyc-codegen-oracle.$$"
 
@@ -21,7 +22,7 @@ gcc_bin="$(find_tool riscv64-linux-gnu-gcc riscv32-linux-gnu-gcc || true)"
 qemu_bin="$(find_tool qemu-riscv32 || true)"
 
 if [[ ! -x "${compiler}" ]]; then
-    echo "skip: build/toyc-compiler is missing; run just build first"
+    echo "skip: ${build_dir}/toyc-compiler is missing; run just build first"
     exit 0
 fi
 
@@ -32,6 +33,18 @@ fi
 
 mkdir -p "${work_dir}"
 trap 'rm -rf "${work_dir}"' EXIT
+
+start_file="${work_dir}/start.s"
+cat >"${start_file}" <<'ASM'
+    .section .text
+    .globl _start
+_start:
+    call main
+    li a7, 93
+    ecall
+ASM
+
+common_flags=(-march=rv32im -mabi=ilp32 -nostdlib -static)
 
 run_and_capture_status() {
     local bin="$1"
@@ -49,8 +62,9 @@ for source in "${cases_dir}"/*.tc; do
     gcc_bin_out="${work_dir}/${name}.gcc"
 
     "${compiler}" < "${source}" > "${asm_file}"
-    "${gcc_bin}" -x assembler "${asm_file}" -o "${toyc_bin}" -march=rv32im -mabi=ilp32
-    "${gcc_bin}" -x c "${source}" -o "${gcc_bin_out}" -march=rv32im -mabi=ilp32
+    "${gcc_bin}" "${common_flags[@]}" -Wl,-e,main -x assembler "${asm_file}" -o "${toyc_bin}"
+    "${gcc_bin}" "${common_flags[@]}" -Wl,-e,_start -x assembler "${start_file}" \
+        -x c "${source}" -x none -o "${gcc_bin_out}"
 
     toyc_status="$(run_and_capture_status "${toyc_bin}")"
     gcc_status="$(run_and_capture_status "${gcc_bin_out}")"
