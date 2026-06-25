@@ -46,6 +46,9 @@ test-filter filter: build
 emit-asm file=sample: build
     {{build_dir}}/toyc-compiler < {{file}}
 
+oracle-codegen: build
+    test/codegen/run_codegen_oracle.sh
+
 coverage: configure-coverage
     cmake --build {{build_dir}} --target coverage
 

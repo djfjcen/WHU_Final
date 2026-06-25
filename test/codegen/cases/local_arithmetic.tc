@@ -1,0 +1,5 @@
+int main() {
+    int x = -5;
+    int y = 3000;
+    return x + y * 2 - 7;
+}

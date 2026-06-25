@@ -11,9 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace toyc {
 namespace {
@@ -163,24 +166,100 @@ TEST(Codegen, RejectsUnsupportedMainBody) {
     EXPECT_TRUE(out.str().empty());
 }
 
-TEST(Codegen, RejectsControlFlowBeforeP3WithoutPartialOutput) {
-    DiagnosticEngine diagnostics;
-    std::istringstream input("int main() { if (1) { return 1; } return 0; }\n");
-    Lexer lexer(input, diagnostics);
-    Parser parser(lexer, diagnostics);
-    std::unique_ptr<CompUnit> unit = parser.parse_comp_unit();
-    ASSERT_NE(nullptr, unit);
-    ASSERT_TRUE(validate_comp_unit(*unit, diagnostics));
-    SemaResult sema = analyze(*unit, diagnostics);
-    ASSERT_TRUE(sema.ok);
-    std::unique_ptr<Module> module = generate(*unit, sema, diagnostics);
-    ASSERT_NE(nullptr, module);
+TEST(Codegen, CompilesControlFlowAndComparisons) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int x = 0; while (x < 3) { x = x + 1; } "
+        "if (x == 3) { return 7; } return 9; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find(".Lmain_bb1:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    slt t2, t0, t1\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    xor t2, t0, t1\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    sltiu t2, t2, 1\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    bne t0, x0, .Lmain_"));
+    EXPECT_NE(std::string::npos, asm_text.find("    j .Lmain_exit\n"));
+}
 
-    std::ostringstream out;
-    CodegenOptions options;
-    EXPECT_FALSE(emit_riscv(*module, options, diagnostics, out));
-    EXPECT_TRUE(diagnostics.has_errors());
-    EXPECT_TRUE(out.str().empty());
+TEST(Codegen, CompilesDivRemAndShortCircuit) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int x = -9; int y = 4; if (x < 0 && y != 0) { "
+        "return x / y + x % y; } return 0; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    div t2, t0, t1\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    rem t2, t0, t1\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    sltu t2, x0, t2\n"));
+}
+
+TEST(Codegen, CompilesRuntimeNegation) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int x = 9; return -x; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    sub t2, x0, t0\n"));
+}
+
+TEST(Codegen, CompilesFunctionCallsAndRecursion) {
+    const std::string asm_text = compile_source_to_asm(
+        "int fact(int n) { if (n <= 1) { return 1; } return n * fact(n - 1); } "
+        "int main() { return fact(5); }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    .globl fact\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("fact:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    sw ra, "));
+    EXPECT_NE(std::string::npos, asm_text.find("    call fact\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    lw ra, "));
+    EXPECT_NE(std::string::npos, asm_text.find("    mul t2, t0, t1\n"));
+}
+
+TEST(Codegen, CompilesVoidCallMutatingGlobal) {
+    const std::string asm_text = compile_source_to_asm(
+        "int g = 0; void inc() { g = g + 1; return; } "
+        "int main() { inc(); return g; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("inc:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    call inc\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    lui t0, %hi(g)\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    sw t1, 0(t0)\n"));
+}
+
+TEST(Codegen, CompilesVoidFallthrough) {
+    const std::string asm_text = compile_source_to_asm(
+        "int g = 0; void set() { g = 1; } int main() { set(); return g; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("set:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find(".Lset_exit:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    call set\n"));
+}
+
+TEST(Codegen, CompilesMoreThanEightArgs) {
+    const std::string asm_text = compile_source_to_asm(
+        "int sum9(int a, int b, int c, int d, int e, int f, int g, int h, int i) { "
+        "return a + b + c + d + e + f + g + h + i; } "
+        "int main() { return sum9(1,2,3,4,5,6,7,8,9); }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("sum9:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    lw t1, 112(sp)\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    sw t0, 0(sp)\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    call sum9\n"));
+}
+
+TEST(Codegen, CompilesEndToEndCases) {
+    const std::vector<std::string> cases = {
+        "return_const.tc",
+        "local_arithmetic.tc",
+        "if_else.tc",
+        "while_sum.tc",
+        "break_continue.tc",
+        "global_mutation.tc",
+        "call_recursive.tc",
+        "void_call.tc",
+        "many_args.tc",
+    };
+
+    for (const std::string& name : cases) {
+        const std::filesystem::path path = std::filesystem::path("test/codegen/cases") / name;
+        SCOPED_TRACE(path.string());
+        std::ifstream input(path);
+        ASSERT_TRUE(input.good());
+        std::ostringstream source;
+        source << input.rdbuf();
+        const std::string asm_text = compile_source_to_asm(source.str());
+        EXPECT_NE(std::string::npos, asm_text.find("    .section .text\n"));
+        EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
+        EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+        EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+    }
 }
 
 TEST(Riscv, RegisterNames) {
