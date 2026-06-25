@@ -87,6 +87,15 @@ target_include_directories(toyc-frontend-tests PRIVATE test/support)
 target_link_libraries(toyc-frontend-tests PRIVATE toyc-core GTest::gtest_main)
 toyc_enable_warnings(toyc-frontend-tests)
 
+add_executable(toyc-ir-tests
+    test/support/ir_fixture.cpp
+    test/ir/ir_tests.cpp
+    test/ir/ir_pipeline_tests.cpp
+)
+target_include_directories(toyc-ir-tests PRIVATE ${CMAKE_SOURCE_DIR})
+target_link_libraries(toyc-ir-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-ir-tests)
+
 if(TOYC_ENABLE_COVERAGE)
     find_program(LLVM_COV llvm-cov)
     find_program(LLVM_PROFDATA llvm-profdata)
