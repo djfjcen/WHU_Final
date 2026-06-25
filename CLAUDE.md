@@ -64,8 +64,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   ```bash
   cmake -S . -B build
   cmake --build build -j
-  ctest --test-dir build --output-on-failure
+  ./build/toyc-frontend-tests
+  ./build/toyc-ir-tests
   ```
+- **测试框架**：GoogleTest（gtest_main），不使用 CTest。测试二进制直接运行。
 
 ## 开发流程
 对照本 CLAUDE.md 和 docs 中的设计，领取分工，之后开始按模块实现

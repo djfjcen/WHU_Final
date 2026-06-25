@@ -1,8 +1,0 @@
-int id(int x) {
-    return x;
-}
-
-int main() {
-    const int x = id(1);
-    return x;
-}

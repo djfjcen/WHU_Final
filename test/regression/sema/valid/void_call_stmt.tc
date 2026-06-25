@@ -1,8 +1,0 @@
-void touch(int x) {
-    x + 1;
-}
-
-int main() {
-    touch(1);
-    return 0;
-}

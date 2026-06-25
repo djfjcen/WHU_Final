@@ -219,9 +219,6 @@ std::unique_ptr<Stmt> Parser::parse_return_stmt(const Token& return_token) {
 }
 
 std::unique_ptr<Stmt> Parser::parse_stmt() {
-    if (had_error_) {
-        return nullptr;
-    }
     if (check(TokenType::LBRACE)) {
         auto block = parse_block();
         return Stmt::make_block(std::move(block->body), block->loc);
@@ -442,7 +439,6 @@ std::unique_ptr<Expr> Parser::parse_primary_expr() {
         return Expr::make_int_literal(parse_number_literal(number.lexeme), number.lexeme, loc_from(number));
     }
     if (match(TokenType::LPAREN)) {
-        const SourceLoc loc = current_loc();
         auto expr = parse_expr();
         expect(TokenType::RPAREN, "expected ')' after expression");
         return expr;

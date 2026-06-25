@@ -1,9 +1,0 @@
-int id(int x) {
-    return x;
-}
-
-int g = id(1);
-
-int main() {
-    return g;
-}

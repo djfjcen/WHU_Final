@@ -4,105 +4,104 @@
 #include "toyc/mem2reg.h"
 #include "toyc/optim.h"
 
-#include "check.h"
+#include <gtest/gtest.h>
 
 #include <algorithm>
 #include <sstream>
 
-using namespace toyc;
-
+namespace toyc {
 namespace {
 
-void test_use_list_wiring() {
+TEST(UseList, Wiring) {
     Module m;
     Value* a = m.create_register(Type::I32);
     Value* b = m.create_register(Type::I32);
     auto u = std::make_unique<StoreInst>(a, b);  // 2 operands: a(ptr), b(val)
     User* user = u.get();
 
-    toyc::test::check(user->num_operands() == 2, "user has 2 operands");
-    toyc::test::check(user->operand(0) == a && user->operand(1) == b, "operands stored");
-    toyc::test::check(a->uses().size() == 1, "a used");
-    toyc::test::check(b->uses().size() == 1, "b used");
+    EXPECT_EQ(2u, user->num_operands());
+    EXPECT_TRUE(user->operand(0) == a && user->operand(1) == b);
+    EXPECT_EQ(1u, a->uses().size());
+    EXPECT_EQ(1u, b->uses().size());
 
     user->set_operand(0, b);
-    toyc::test::check(a->uses().empty(), "a no longer used");
-    toyc::test::check(b->uses().size() == 2, "b used twice");
+    EXPECT_TRUE(a->uses().empty());
+    EXPECT_EQ(2u, b->uses().size());
 
     b->replace_all_uses_with(a);
-    toyc::test::check(user->operand(0) == a && user->operand(1) == a, "RAUW rewires");
-    toyc::test::check(b->uses().empty(), "b replaced out");
+    EXPECT_TRUE(user->operand(0) == a && user->operand(1) == a);
+    EXPECT_TRUE(b->uses().empty());
 }
 
-void test_constant_pool_and_globals() {
+TEST(Constant, PoolAndGlobals) {
     Module m;
     ConstantInt* c1 = m.get_constant(42);
     ConstantInt* c2 = m.get_constant(42);
     ConstantInt* c3 = m.get_constant(7);
 
-    toyc::test::check(c1 == c2, "constant 42 uniqued");
-    toyc::test::check(c1 != c3, "constant 7 distinct");
-    toyc::test::check(c1->value() == 42, "constant value 42");
-    toyc::test::check_eq_str("42", c1->name(), "constant name is literal");
+    EXPECT_TRUE(c1 == c2);
+    EXPECT_TRUE(c1 != c3);
+    EXPECT_EQ(42, c1->value());
+    EXPECT_EQ("42", c1->name());
 
     GlobalVar* g = m.create_global("g_count", 0, /*is_const=*/false);
-    toyc::test::check_eq_str("@g_count", g->addr->name(), "global addr name");
-    toyc::test::check(g->addr->type() == Type::Ptr, "global addr is ptr");
-    toyc::test::check(g->init->value() == 0, "global init value");
-    toyc::test::check(!g->is_const, "global is var not const");
+    EXPECT_EQ("@g_count", g->addr->name());
+    EXPECT_TRUE(g->addr->type() == Type::Ptr);
+    EXPECT_EQ(0, g->init->value());
+    EXPECT_FALSE(g->is_const);
 
     Value* r = m.create_register(Type::I32);
-    toyc::test::check_eq_str("%v.0", r->name(), "register name %v.0");
-    toyc::test::check(r->type() == Type::I32, "register type i32");
+    EXPECT_EQ("%v.0", r->name());
+    EXPECT_TRUE(r->type() == Type::I32);
 }
 
-void test_instruction_construction() {
+TEST(Instruction, Construction) {
     Module m;
     Value* a = m.create_register(Type::I32);
     Value* b = m.create_register(Type::I32);
 
     auto add = std::make_unique<BinaryInst>(Opcode::Add, a, b, m.fresh_id());
-    toyc::test::check(add->opcode() == Opcode::Add, "add opcode");
-    toyc::test::check(add->type() == Type::I32, "add result i32");
-    toyc::test::check(add->has_result(), "add has result");
-    toyc::test::check(add->operand(0) == a && add->operand(1) == b, "add operands");
-    toyc::test::check(add->num_operands() == 2, "add 2 operands");
-    toyc::test::check(!add->is_terminator(), "add not terminator");
-    toyc::test::check(a->uses().size() == 1, "a used by add");
+    EXPECT_TRUE(add->opcode() == Opcode::Add);
+    EXPECT_TRUE(add->type() == Type::I32);
+    EXPECT_TRUE(add->has_result());
+    EXPECT_TRUE(add->operand(0) == a && add->operand(1) == b);
+    EXPECT_EQ(2u, add->num_operands());
+    EXPECT_FALSE(add->is_terminator());
+    EXPECT_EQ(1u, a->uses().size());
 
     auto slt = std::make_unique<ICmpInst>(Opcode::ICmpSlt, a, b, m.fresh_id());
-    toyc::test::check(slt->opcode() == Opcode::ICmpSlt && slt->type() == Type::I32, "icmp i32 result");
+    EXPECT_TRUE(slt->opcode() == Opcode::ICmpSlt && slt->type() == Type::I32);
 
     ConstantInt* one = m.get_constant(1);
     auto ret = std::make_unique<RetInst>(one);
-    toyc::test::check(ret->is_terminator(), "ret terminator");
-    toyc::test::check(!ret->has_result(), "ret has no result");
-    toyc::test::check(ret->operand(0) == one, "ret operand");
+    EXPECT_TRUE(ret->is_terminator());
+    EXPECT_FALSE(ret->has_result());
+    EXPECT_EQ(one, ret->operand(0));
 
     auto ret_void = std::make_unique<RetInst>(/*value=*/nullptr);
-    toyc::test::check(ret_void->num_operands() == 0, "void ret 0 operands");
+    EXPECT_EQ(0u, ret_void->num_operands());
 
     auto store = std::make_unique<StoreInst>(a, b);
-    toyc::test::check(store->opcode() == Opcode::Store, "store opcode");
-    toyc::test::check(!store->has_result(), "store has no result");
-    toyc::test::check(store->operand(0) == a && store->operand(1) == b, "store operands ptr,val");
+    EXPECT_TRUE(store->opcode() == Opcode::Store);
+    EXPECT_FALSE(store->has_result());
+    EXPECT_TRUE(store->operand(0) == a && store->operand(1) == b);
 }
 
-void test_function_and_blocks() {
+TEST(Function, Blocks) {
     Module m;
     Function* f = m.create_function("add", FuncRet::Int, /*params=*/2);
 
-    toyc::test::check_eq_str("@add", f->name(), "function name");
-    toyc::test::check(f->ret_type() == FuncRet::Int, "function ret int");
-    toyc::test::check(f->params().size() == 2, "2 params");
-    toyc::test::check_eq_str("%arg.0", f->param(0)->name(), "param 0 name");
-    toyc::test::check_eq_str("%arg.1", f->param(1)->name(), "param 1 name");
+    EXPECT_EQ("@add", f->name());
+    EXPECT_TRUE(f->ret_type() == FuncRet::Int);
+    EXPECT_EQ(2u, f->params().size());
+    EXPECT_EQ("%arg.0", f->param(0)->name());
+    EXPECT_EQ("%arg.1", f->param(1)->name());
 
     BasicBlock* entry = f->create_block();
     BasicBlock* bb1 = f->create_block();
-    toyc::test::check_eq_str("entry", entry->name(), "entry label");
-    toyc::test::check_eq_str("bb1", bb1->name(), "bb1 label");
-    toyc::test::check(f->entry() == entry, "entry is first block");
+    EXPECT_EQ("entry", entry->name());
+    EXPECT_EQ("bb1", bb1->name());
+    EXPECT_EQ(entry, f->entry());
 
     Value* a = f->param(0);
     Value* one = m.get_constant(1);
@@ -111,12 +110,12 @@ void test_function_and_blocks() {
     Instruction* add_raw = add.get();
     entry->push_back(std::move(add));
     entry->push_back(std::move(ret));
-    toyc::test::check(add_raw->parent() == entry, "inst parent set");
-    toyc::test::check(entry->terminator()->opcode() == Opcode::Ret, "terminator is ret");
-    toyc::test::check_eq_str("%v.0", add_raw->name(), "add result name %v.0");
+    EXPECT_EQ(entry, add_raw->parent());
+    EXPECT_TRUE(entry->terminator()->opcode() == Opcode::Ret);
+    EXPECT_EQ("%v.0", add_raw->name());
 }
 
-void test_printer_basic() {
+TEST(Printer, Basic) {
     Module m;
     m.create_global("g_count", 0, /*is_const=*/false);
     Function* f = m.create_function("f", FuncRet::Int, /*params=*/1);
@@ -152,10 +151,10 @@ void test_printer_basic() {
         "  %v.2 = add %v.1, 1\n"
         "  ret %v.2\n"
         "}\n";
-    toyc::test::check_eq_str(expected, out.str(), "module print");
+    EXPECT_EQ(expected, out.str());
 }
 
-void test_builder_matches_printer() {
+TEST(Printer, BuilderMatches) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 1);
     BasicBlock* entry = f->create_block();
@@ -179,10 +178,10 @@ void test_builder_matches_printer() {
         "  %v.2 = add %v.1, 1\n"
         "  ret %v.2\n"
         "}\n";
-    toyc::test::check_eq_str(expected, out.str(), "builder output matches direct construction");
+    EXPECT_EQ(expected, out.str());
 }
 
-void test_dominator_tree_straight() {
+TEST(DominatorTree, Straight) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();   // entry
@@ -194,14 +193,16 @@ void test_dominator_tree_straight() {
 
     DominatorTree dt;
     dt.analyze(*f);
-    toyc::test::check(dt.idom(entry) == entry, "straight: entry idom self");
-    toyc::test::check(dt.idom(mid) == entry, "straight: mid idom entry");
-    toyc::test::check(dt.idom(end) == mid, "straight: end idom mid");
-    toyc::test::check(dt.succs(entry).size() == 1 && dt.succs(entry)[0] == mid, "straight: entry succ mid");
-    toyc::test::check(dt.preds(end).size() == 1 && dt.preds(end)[0] == mid, "straight: end pred mid");
+    EXPECT_EQ(entry, dt.idom(entry));
+    EXPECT_EQ(entry, dt.idom(mid));
+    EXPECT_EQ(mid, dt.idom(end));
+    EXPECT_EQ(1u, dt.succs(entry).size());
+    EXPECT_EQ(mid, dt.succs(entry)[0]);
+    EXPECT_EQ(1u, dt.preds(end).size());
+    EXPECT_EQ(mid, dt.preds(end)[0]);
 }
 
-void test_dominator_tree_diamond() {
+TEST(DominatorTree, Diamond) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -216,14 +217,14 @@ void test_dominator_tree_diamond() {
 
     DominatorTree dt;
     dt.analyze(*f);
-    toyc::test::check(dt.idom(then) == entry, "diamond: then idom entry");
-    toyc::test::check(dt.idom(els) == entry, "diamond: els idom entry");
-    toyc::test::check(dt.idom(merge) == entry, "diamond: merge idom entry");
-    toyc::test::check(dt.preds(merge).size() == 2, "diamond: merge 2 preds");
-    toyc::test::check(dt.children(entry).size() == 3, "diamond: entry 3 dom children");
+    EXPECT_EQ(entry, dt.idom(then));
+    EXPECT_EQ(entry, dt.idom(els));
+    EXPECT_EQ(entry, dt.idom(merge));
+    EXPECT_EQ(2u, dt.preds(merge).size());
+    EXPECT_EQ(3u, dt.children(entry).size());
 }
 
-void test_dominator_tree_loop() {
+TEST(DominatorTree, Loop) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -237,13 +238,13 @@ void test_dominator_tree_loop() {
 
     DominatorTree dt;
     dt.analyze(*f);
-    toyc::test::check(dt.idom(header) == entry, "loop: header idom entry");
-    toyc::test::check(dt.idom(body) == header, "loop: body idom header");
-    toyc::test::check(dt.idom(exit) == header, "loop: exit idom header");
-    toyc::test::check(dt.preds(header).size() == 2, "loop: header 2 preds (entry+body)");
+    EXPECT_EQ(entry, dt.idom(header));
+    EXPECT_EQ(header, dt.idom(body));
+    EXPECT_EQ(header, dt.idom(exit));
+    EXPECT_EQ(2u, dt.preds(header).size());
 }
 
-void test_dom_frontier() {
+TEST(DominatorTree, Frontier) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -260,13 +261,13 @@ void test_dom_frontier() {
     auto contains = [](const std::vector<BasicBlock*>& v, BasicBlock* b) {
         return std::find(v.begin(), v.end(), b) != v.end();
     };
-    toyc::test::check(contains(dt.dom_frontier(body), header), "df: DF(body) has header");
-    toyc::test::check(contains(dt.dom_frontier(header), header), "df: DF(header) has header");
-    toyc::test::check(dt.dom_frontier(entry).empty(), "df: DF(entry) empty");
-    toyc::test::check(dt.dom_frontier(exit).empty(), "df: DF(exit) empty");
+    EXPECT_TRUE(contains(dt.dom_frontier(body), header));
+    EXPECT_TRUE(contains(dt.dom_frontier(header), header));
+    EXPECT_TRUE(dt.dom_frontier(entry).empty());
+    EXPECT_TRUE(dt.dom_frontier(exit).empty());
 }
 
-void test_mem2reg_inserts_phi() {
+TEST(Mem2Reg, InsertsPhi) {
     // int a; a=0; if(1){a=1;}else{a=2;} return a;  -> phi at merge.
     Module m;
     Function* f = m.create_function("main", FuncRet::Int, 0);
@@ -292,11 +293,11 @@ void test_mem2reg_inserts_phi() {
     for (const std::unique_ptr<Instruction>& inst : merge->insts()) {
         if (inst->opcode() == Opcode::Phi) { merge_has_phi = true; break; }
     }
-    toyc::test::check(merge_has_phi, "m2r: phi inserted at merge");
-    toyc::test::check(then->insts().front()->opcode() != Opcode::Phi, "m2r: no phi at then");
+    EXPECT_TRUE(merge_has_phi);
+    EXPECT_TRUE(then->insts().front()->opcode() != Opcode::Phi);
 }
 
-void test_mem2reg_rename() {
+TEST(Mem2Reg, Rename) {
     Module m;
     Function* f = m.create_function("main", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -322,20 +323,19 @@ void test_mem2reg_rename() {
 
     // ret operand should now be the phi (not the deleted load).
     Instruction* term = merge->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "rename: merge ends in ret");
-    toyc::test::check(term->operand(0)->value_kind() != ValueKind::Register ||
-                      term->operand(0) != load_raw, "rename: ret no longer uses old load");
-    // find the phi in merge
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_TRUE(term->operand(0)->value_kind() != ValueKind::Register ||
+                term->operand(0) != load_raw);
     PhiInst* phi = nullptr;
     for (const std::unique_ptr<Instruction>& inst : merge->insts()) {
         if (inst->opcode() == Opcode::Phi) { phi = static_cast<PhiInst*>(inst.get()); break; }
     }
-    toyc::test::check(phi != nullptr, "rename: merge has phi");
-    toyc::test::check(phi && phi->num_operands() == 2, "rename: phi has 2 incoming");
-    toyc::test::check(phi && term->operand(0) == phi, "rename: ret uses phi");
+    EXPECT_NE(nullptr, phi);
+    EXPECT_TRUE(phi && phi->num_operands() == 2);
+    EXPECT_TRUE(phi && term->operand(0) == phi);
 }
 
-void test_mem2reg_full_ssa() {
+TEST(Mem2Reg, FullSsa) {
     Module m;
     Function* f = m.create_function("main", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -366,7 +366,7 @@ void test_mem2reg_full_ssa() {
             if (op == Opcode::Alloca || op == Opcode::Load || op == Opcode::Store) ++dead;
         }
     }
-    toyc::test::check(dead == 0, "cleanup: no alloca/load/store left");
+    EXPECT_EQ(0, dead);
 
     // Phi incoming order matches merge's preds order (then, els).
     DominatorTree dt;
@@ -376,12 +376,12 @@ void test_mem2reg_full_ssa() {
         if (inst->opcode() == Opcode::Phi) { phi = static_cast<PhiInst*>(inst.get()); break; }
     }
     const std::vector<BasicBlock*>& preds = dt.preds(merge);
-    toyc::test::check(phi && phi->num_operands() == preds.size(), "normalize: phi arity == preds");
+    EXPECT_TRUE(phi && phi->num_operands() == preds.size());
     bool order_ok = true;
     for (unsigned i = 0; phi && i < preds.size(); ++i) {
         if (phi->incoming_blocks()[i] != preds[i]) order_ok = false;
     }
-    toyc::test::check(order_ok, "normalize: phi incoming == preds order");
+    EXPECT_TRUE(order_ok);
 
     std::ostringstream out;
     print_module(m, out);
@@ -397,14 +397,12 @@ void test_mem2reg_full_ssa() {
         "  %v.2 = phi [1, bb1], [2, bb2]\n"
         "  ret %v.2\n"
         "}\n";
-    toyc::test::check_eq_str(expected, out.str(), "full ssa print");
+    EXPECT_EQ(expected, out.str());
 }
 
-void test_mem2reg_cleanup_use_lists() {
+TEST(Mem2Reg, CleanupUseLists) {
     // Regression: mem2reg erase must detach operand use-lists before destroying
     // the instruction, otherwise surviving values hold dangling User* pointers.
-    // Construct: a surviving def %x stored to a promotable alloca, then exercise
-    // replace_all_uses_with on %x post-mem2reg.
     Module m;
     Function* f = m.create_function("main", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -414,30 +412,26 @@ void test_mem2reg_cleanup_use_lists() {
     entry->push_back(std::move(alloca));
     entry->push_back(std::make_unique<StoreInst>(slot, m.get_constant(0)));
 
-    // Surviving instruction whose value is stored to the promotable alloca.
     auto x_inst = std::make_unique<BinaryInst>(Opcode::Add, m.get_constant(1), m.get_constant(2), m.fresh_id());
     Value* x = x_inst.get();
     entry->push_back(std::move(x_inst));
-    entry->push_back(std::make_unique<StoreInst>(slot, x));  // this store will be erased by mem2reg
+    entry->push_back(std::make_unique<StoreInst>(slot, x));  // erased by mem2reg
 
     entry->push_back(std::make_unique<RetInst>(m.get_constant(0)));
 
     mem2reg(*f);
 
-    // The key: iterating uses of the surviving value %x must not crash.
+    // Iterating uses of the surviving value %x must not crash (would UAF without the fix).
     for ([[maybe_unused]] User* u : x->uses()) {
-        // just iterate; would UAF without the fix
     }
 
-    // replace_all_uses_with on %x must not crash (the exact scenario that hit UAF).
     Value* c = m.get_constant(99);
     x->replace_all_uses_with(c);
 
-    toyc::test::check(x->uses().empty(), "m2r-use: x has no uses after RAUW");
-    toyc::test::check(true, "m2r-use: no crash iterating dangling use-list");
+    EXPECT_TRUE(x->uses().empty());
 }
 
-void test_constprop_folds_binary() {
+TEST(ConstProp, FoldsBinary) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -447,15 +441,15 @@ void test_constprop_folds_binary() {
     entry->push_back(std::make_unique<RetInst>(mul_raw));
 
     bool changed = constprop(*f);
-    toyc::test::check(changed, "cp: changed");
-    toyc::test::check(entry->insts().size() == 1, "cp: folded mul removed");
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(1u, entry->insts().size());
     Instruction* term = entry->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "cp: ret remains");
-    toyc::test::check(term->operand(0)->value_kind() == ValueKind::Constant, "cp: ret operand constant");
-    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 12, "cp: 3*4 == 12");
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_TRUE(term->operand(0)->value_kind() == ValueKind::Constant);
+    EXPECT_EQ(12, static_cast<ConstantInt*>(term->operand(0))->value());
 }
 
-void test_constprop_propagates_chain() {
+TEST(ConstProp, PropagatesChain) {
     // mul 3,4 -> 12 exposes add 2,12 -> 14 in one sweep-to-fixpoint.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
@@ -470,12 +464,12 @@ void test_constprop_propagates_chain() {
 
     constprop(*f);
     Instruction* term = entry->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "cp-chain: ret");
-    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 14, "cp-chain: 2+3*4 == 14");
-    toyc::test::check(entry->insts().size() == 1, "cp-chain: only ret left");
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_EQ(14, static_cast<ConstantInt*>(term->operand(0))->value());
+    EXPECT_EQ(1u, entry->insts().size());
 }
 
-void test_constprop_skips_div_zero() {
+TEST(ConstProp, SkipsDivZero) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -485,11 +479,11 @@ void test_constprop_skips_div_zero() {
     entry->push_back(std::make_unique<RetInst>(div_raw));
 
     bool changed = constprop(*f);
-    toyc::test::check(!changed, "cp: div-by-zero not folded");
-    toyc::test::check(entry->insts().size() == 2, "cp: div preserved");
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(2u, entry->insts().size());
 }
 
-void test_constprop_keeps_call() {
+TEST(ConstProp, KeepsCall) {
     // An int-returning call with two constant operands must NOT be folded: it
     // reaches the binary-fold branch by operand count, but Call is not a binary
     // arithmetic/compare op. Guards the explicit Call exclusion in constprop.
@@ -503,12 +497,12 @@ void test_constprop_keeps_call() {
     entry->push_back(std::make_unique<RetInst>(call_raw));
 
     bool changed = constprop(*f);
-    toyc::test::check(!changed, "cp-call: call not folded");
-    toyc::test::check(entry->insts().size() == 2, "cp-call: call + ret preserved");
-    toyc::test::check(entry->insts().front()->opcode() == Opcode::Call, "cp-call: call remains");
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(2u, entry->insts().size());
+    EXPECT_TRUE(entry->insts().front()->opcode() == Opcode::Call);
 }
 
-void test_dce_removes_dead_compute() {
+TEST(Dce, RemovesDeadCompute) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();
@@ -518,12 +512,12 @@ void test_dce_removes_dead_compute() {
     entry->push_back(std::make_unique<RetInst>(m.get_constant(0)));
 
     bool changed = dce(*f);
-    toyc::test::check(changed, "dce: changed");
-    toyc::test::check(entry->insts().size() == 1, "dce: only ret remains");
-    toyc::test::check(entry->terminator()->opcode() == Opcode::Ret, "dce: ret kept");
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(1u, entry->insts().size());
+    EXPECT_TRUE(entry->terminator()->opcode() == Opcode::Ret);
 }
 
-void test_dce_keeps_live_chain() {
+TEST(Dce, KeepsLiveChain) {
     // add feeds ret -> live; unused mul -> dead.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
@@ -537,10 +531,10 @@ void test_dce_keeps_live_chain() {
     entry->push_back(std::make_unique<RetInst>(add_raw));
 
     dce(*f);
-    toyc::test::check(entry->insts().size() == 2, "dce: add+ret kept, mul gone");
+    EXPECT_EQ(2u, entry->insts().size());
 }
 
-void test_gvn_cse_identical() {
+TEST(Gvn, CseIdentical) {
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 2);
     BasicBlock* entry = f->create_block();
@@ -558,14 +552,14 @@ void test_gvn_cse_identical() {
     entry->push_back(std::make_unique<RetInst>(sum_raw));
 
     bool changed = gvn(*f);
-    toyc::test::check(changed, "gvn: changed");
+    EXPECT_TRUE(changed);
     bool a2_present = false;
     for (const std::unique_ptr<Instruction>& inst : entry->insts()) if (inst.get() == a2) a2_present = true;
-    toyc::test::check(!a2_present, "gvn: duplicate add removed");
-    toyc::test::check(sum_raw->operand(0) == a1 && sum_raw->operand(1) == a1, "gvn: sum uses first add twice");
+    EXPECT_FALSE(a2_present);
+    EXPECT_TRUE(sum_raw->operand(0) == a1 && sum_raw->operand(1) == a1);
 }
 
-void test_gvn_commutative() {
+TEST(Gvn, Commutative) {
     // add(a,b) and add(b,a) must CSE together via operand normalization.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 2);
@@ -585,12 +579,11 @@ void test_gvn_commutative() {
     gvn(*f);
     bool a2_present = false;
     for (const std::unique_ptr<Instruction>& inst : entry->insts()) if (inst.get() == a2) a2_present = true;
-    toyc::test::check(!a2_present, "gvn: commutative duplicate removed");
+    EXPECT_FALSE(a2_present);
 }
 
-void test_gvn_dominance_scoped() {
+TEST(Gvn, DominanceScoped) {
     // add(a,b) in a non-dominating sibling block must NOT be reused.
-    //   entry -> left, right ; left: add a,b; ret ; right: add a,b; ret
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 2);
     BasicBlock* entry = f->create_block();
@@ -611,10 +604,10 @@ void test_gvn_dominance_scoped() {
     // right's add survives: left does not dominate right.
     bool right_add_present = false;
     for (const std::unique_ptr<Instruction>& inst : right->insts()) if (inst.get() == r_add_raw) right_add_present = true;
-    toyc::test::check(right_add_present, "gvn: non-dominating add kept");
+    EXPECT_TRUE(right_add_present);
 }
 
-void test_cfs_folds_const_branch() {
+TEST(Cfs, FoldsConstBranch) {
     // cond_br 1 -> br then; else unreachable -> removed; then merged into entry.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
@@ -626,16 +619,16 @@ void test_cfs_folds_const_branch() {
     elseB->push_back(std::make_unique<RetInst>(m.get_constant(8)));
 
     bool changed = cfs(*f);
-    toyc::test::check(changed, "cfs: changed");
+    EXPECT_TRUE(changed);
     bool else_present = false;
     for (const std::unique_ptr<BasicBlock>& b : f->blocks()) if (b.get() == elseB) else_present = true;
-    toyc::test::check(!else_present, "cfs: unreachable else removed");
+    EXPECT_FALSE(else_present);
     Instruction* term = f->entry()->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "cfs: entry ends in ret");
-    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 7, "cfs: ret 7");
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_EQ(7, static_cast<ConstantInt*>(term->operand(0))->value());
 }
 
-void test_cfs_trivial_phi() {
+TEST(Cfs, TrivialPhi) {
     // Two preds, phi with identical incomings -> replaced by that value.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 1);
@@ -656,14 +649,14 @@ void test_cfs_trivial_phi() {
 
     cfs(*f);
     Instruction* term = merge->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "cfs-phi: ret");
-    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 5, "cfs-phi: ret 5");
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_EQ(5, static_cast<ConstantInt*>(term->operand(0))->value());
     bool phi_present = false;
     for (const std::unique_ptr<Instruction>& inst : merge->insts()) if (inst.get() == phi_raw) phi_present = true;
-    toyc::test::check(!phi_present, "cfs-phi: trivial phi removed");
+    EXPECT_FALSE(phi_present);
 }
 
-void test_run_optim_fixpoint() {
+TEST(RunOptim, Fixpoint) {
     // mul 3,4 -> 12 (ConstProp) exposes add 2,12 -> 14 (ConstProp next round).
     Module m;
     Function* f = m.create_function("main", FuncRet::Int, 0);
@@ -677,41 +670,12 @@ void test_run_optim_fixpoint() {
     entry->push_back(std::make_unique<RetInst>(add_raw));
 
     bool changed = run_optim(m);
-    toyc::test::check(changed, "run_optim: changed");
+    EXPECT_TRUE(changed);
     Instruction* term = f->entry()->terminator();
-    toyc::test::check(term->opcode() == Opcode::Ret, "run_optim: ret");
-    toyc::test::check(static_cast<ConstantInt*>(term->operand(0))->value() == 14, "run_optim: 2+3*4 == 14");
-    toyc::test::check(entry->insts().size() == 1, "run_optim: only ret left");
+    EXPECT_TRUE(term->opcode() == Opcode::Ret);
+    EXPECT_EQ(14, static_cast<ConstantInt*>(term->operand(0))->value());
+    EXPECT_EQ(1u, entry->insts().size());
 }
 
 }  // namespace
-
-int main() {
-    test_use_list_wiring();
-    test_constant_pool_and_globals();
-    test_instruction_construction();
-    test_function_and_blocks();
-    test_printer_basic();
-    test_builder_matches_printer();
-    test_dominator_tree_straight();
-    test_dominator_tree_diamond();
-    test_dominator_tree_loop();
-    test_dom_frontier();
-    test_mem2reg_inserts_phi();
-    test_mem2reg_rename();
-    test_mem2reg_full_ssa();
-    test_mem2reg_cleanup_use_lists();
-    test_constprop_folds_binary();
-    test_constprop_propagates_chain();
-    test_constprop_skips_div_zero();
-    test_constprop_keeps_call();
-    test_dce_removes_dead_compute();
-    test_dce_keeps_live_chain();
-    test_gvn_cse_identical();
-    test_gvn_commutative();
-    test_gvn_dominance_scoped();
-    test_cfs_folds_const_branch();
-    test_cfs_trivial_phi();
-    test_run_optim_fixpoint();
-    return toyc::test::report();
-}
+}  // namespace toyc
