@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -124,7 +125,11 @@ public:
   FunctionLowerer(const Function &function, const CodegenOptions &options,
                   DiagnosticEngine &diagnostics, AsmWriter &writer)
       : function_(function), options_(options), diagnostics_(diagnostics),
-        writer_(writer), frame_(function) {}
+        writer_(writer), frame_(function) {
+    if (options_.opt_mode) {
+      plan_local_registers();
+    }
+  }
 
   bool lower() {
     if (!validate_function_shape()) {
@@ -226,6 +231,9 @@ private:
     if (inst.num_operands() != 2) {
       return fail("malformed binary instruction");
     }
+    if (try_lower_immediate_binary(inst)) {
+      return true;
+    }
     if (!load_i32(inst.operand(0), RvReg::T0) ||
         !load_i32(inst.operand(1), RvReg::T1)) {
       return false;
@@ -270,6 +278,9 @@ private:
   bool lower_icmp(const Instruction &inst) {
     if (inst.num_operands() != 2) {
       return fail("malformed icmp instruction");
+    }
+    if (is_direct_branch_condition(inst)) {
+      return true;
     }
     if (!load_i32(inst.operand(0), RvReg::T0) ||
         !load_i32(inst.operand(1), RvReg::T1)) {
@@ -321,7 +332,9 @@ private:
     if (!emit_phi_copies(target, *inst.parent())) {
       return false;
     }
-    writer_.inst("j", block_label(function_, target));
+    if (!is_fallthrough(*inst.parent(), target)) {
+      writer_.inst("j", block_label(function_, target));
+    }
     return true;
   }
 
@@ -331,25 +344,94 @@ private:
         inst.operand(2)->value_kind() != ValueKind::BasicBlock) {
       return fail("malformed cond_br instruction");
     }
-    if (!load_i32(inst.operand(0), RvReg::T0)) {
-      return false;
-    }
     const BasicBlock &true_target =
         *static_cast<const BasicBlock *>(inst.operand(1));
     const BasicBlock &false_target =
         *static_cast<const BasicBlock *>(inst.operand(2));
     const std::string true_copy_label = edge_copy_label(*inst.parent(), true_target);
+    if (try_lower_direct_compare_branch(inst, true_target, false_target,
+                                        true_copy_label)) {
+      return true;
+    }
+    if (!load_i32(inst.operand(0), RvReg::T0)) {
+      return false;
+    }
     writer_.inst("bne", reg_name(RvReg::T0), reg_name(RvReg::Zero),
                  true_copy_label);
     if (!emit_phi_copies(false_target, *inst.parent())) {
       return false;
     }
-    writer_.inst("j", block_label(function_, false_target));
+    if (!is_fallthrough(*inst.parent(), false_target)) {
+      writer_.inst("j", block_label(function_, false_target));
+    }
     writer_.label(true_copy_label);
     if (!emit_phi_copies(true_target, *inst.parent())) {
       return false;
     }
-    writer_.inst("j", block_label(function_, true_target));
+    if (!is_fallthrough(*inst.parent(), true_target)) {
+      writer_.inst("j", block_label(function_, true_target));
+    }
+    return true;
+  }
+
+  bool try_lower_direct_compare_branch(const Instruction &branch,
+                                       const BasicBlock &true_target,
+                                       const BasicBlock &false_target,
+                                       const std::string &true_copy_label) {
+    if (branch.operand(0)->value_kind() != ValueKind::Register) {
+      return false;
+    }
+    const Instruction *cmp = static_cast<const Instruction *>(branch.operand(0));
+    if (!is_icmp_opcode(cmp->opcode()) || !is_direct_branch_condition(*cmp)) {
+      return false;
+    }
+    if (!load_i32(cmp->operand(0), RvReg::T0) ||
+        !load_i32(cmp->operand(1), RvReg::T1)) {
+      return false;
+    }
+
+    switch (cmp->opcode()) {
+    case Opcode::ICmpEq:
+      writer_.inst("beq", reg_name(RvReg::T0), reg_name(RvReg::T1),
+                   true_copy_label);
+      break;
+    case Opcode::ICmpNe:
+      writer_.inst("bne", reg_name(RvReg::T0), reg_name(RvReg::T1),
+                   true_copy_label);
+      break;
+    case Opcode::ICmpSlt:
+      writer_.inst("blt", reg_name(RvReg::T0), reg_name(RvReg::T1),
+                   true_copy_label);
+      break;
+    case Opcode::ICmpSgt:
+      writer_.inst("blt", reg_name(RvReg::T1), reg_name(RvReg::T0),
+                   true_copy_label);
+      break;
+    case Opcode::ICmpSle:
+      writer_.inst("bge", reg_name(RvReg::T1), reg_name(RvReg::T0),
+                   true_copy_label);
+      break;
+    case Opcode::ICmpSge:
+      writer_.inst("bge", reg_name(RvReg::T0), reg_name(RvReg::T1),
+                   true_copy_label);
+      break;
+    default:
+      return false;
+    }
+
+    if (!emit_phi_copies(false_target, *branch.parent())) {
+      return false;
+    }
+    if (!is_fallthrough(*branch.parent(), false_target)) {
+      writer_.inst("j", block_label(function_, false_target));
+    }
+    writer_.label(true_copy_label);
+    if (!emit_phi_copies(true_target, *branch.parent())) {
+      return false;
+    }
+    if (!is_fallthrough(*branch.parent(), true_target)) {
+      writer_.inst("j", block_label(function_, true_target));
+    }
     return true;
   }
 
@@ -492,6 +574,11 @@ private:
       return true;
     }
     if (frame_.has_slot(value)) {
+      auto reg = value_regs_.find(value);
+      if (reg != value_regs_.end()) {
+        emit_reg_copy(dst, reg->second);
+        return true;
+      }
       writer_.inst("lw", reg_name(dst),
                    offset_addr(frame_.slot_offset(value), RvReg::Sp));
       return true;
@@ -527,6 +614,11 @@ private:
     if (!frame_.has_slot(&inst)) {
       return fail("codegen has no result slot for " + inst.name());
     }
+    auto reg = value_regs_.find(&inst);
+    if (reg != value_regs_.end()) {
+      emit_reg_copy(reg->second, src);
+      return true;
+    }
     writer_.inst("sw", reg_name(src),
                  offset_addr(frame_.slot_offset(&inst), RvReg::Sp));
     return true;
@@ -538,8 +630,7 @@ private:
       return;
     }
     if (fits_i12(value)) {
-      writer_.inst("addi", reg_name(dst), reg_name(RvReg::Zero),
-                   std::to_string(value));
+      emit_addi(dst, RvReg::Zero, value);
       return;
     }
     const int64_t rounded = static_cast<int64_t>(value) + 0x800;
@@ -548,6 +639,172 @@ private:
     writer_.inst("lui", reg_name(dst), std::to_string(hi));
     if (lo != 0) {
       writer_.inst("addi", reg_name(dst), reg_name(dst), std::to_string(lo));
+    }
+  }
+
+  bool try_lower_immediate_binary(const Instruction &inst) {
+    if (inst.opcode() != Opcode::Add && inst.opcode() != Opcode::Sub) {
+      return false;
+    }
+    Value *lhs = inst.operand(0);
+    Value *rhs = inst.operand(1);
+    if (rhs->value_kind() == ValueKind::Constant) {
+      int imm = static_cast<const ConstantInt *>(rhs)->value();
+      if (inst.opcode() == Opcode::Sub) {
+        if (imm == std::numeric_limits<int>::min()) {
+          return false;
+        }
+        imm = -imm;
+      }
+      if (fits_i12(imm) && load_i32(lhs, RvReg::T0)) {
+        emit_addi(RvReg::T2, RvReg::T0, imm);
+        return spill_result(inst, RvReg::T2);
+      }
+      return false;
+    }
+    if (inst.opcode() == Opcode::Add && lhs->value_kind() == ValueKind::Constant) {
+      const int imm = static_cast<const ConstantInt *>(lhs)->value();
+      if (fits_i12(imm) && load_i32(rhs, RvReg::T0)) {
+        emit_addi(RvReg::T2, RvReg::T0, imm);
+        return spill_result(inst, RvReg::T2);
+      }
+    }
+    return false;
+  }
+
+  void emit_addi(RvReg dst, RvReg src, int imm) {
+    if (imm == 0 && dst == src) {
+      return;
+    }
+    writer_.inst("addi", reg_name(dst), reg_name(src), std::to_string(imm));
+  }
+
+  void emit_reg_copy(RvReg dst, RvReg src) {
+    if (dst == src) {
+      return;
+    }
+    writer_.inst("add", reg_name(dst), reg_name(src), reg_name(RvReg::Zero));
+  }
+
+  bool is_direct_branch_condition(const Instruction &inst) const {
+    return inst.parent() && inst.uses().size() == 1 &&
+           dynamic_cast<const Instruction *>(inst.uses().front()) &&
+           static_cast<const Instruction *>(inst.uses().front())->parent() == inst.parent() &&
+           static_cast<const Instruction *>(inst.uses().front())->opcode() == Opcode::CondBr;
+  }
+
+  static bool is_icmp_opcode(Opcode opcode) {
+    return opcode == Opcode::ICmpEq || opcode == Opcode::ICmpNe ||
+           opcode == Opcode::ICmpSlt || opcode == Opcode::ICmpSgt ||
+           opcode == Opcode::ICmpSle || opcode == Opcode::ICmpSge;
+  }
+
+  bool is_fallthrough(const BasicBlock &from, const BasicBlock &to) const {
+    for (auto it = function_.blocks().begin(); it != function_.blocks().end(); ++it) {
+      if (it->get() != &from) {
+        continue;
+      }
+      ++it;
+      return it != function_.blocks().end() && it->get() == &to;
+    }
+    return false;
+  }
+
+  static bool is_register_candidate(const Instruction &inst) {
+    switch (inst.opcode()) {
+    case Opcode::Load:
+    case Opcode::Add:
+    case Opcode::Sub:
+    case Opcode::Mul:
+    case Opcode::Sdiv:
+    case Opcode::Srem:
+    case Opcode::Neg:
+    case Opcode::ICmpEq:
+    case Opcode::ICmpNe:
+    case Opcode::ICmpSlt:
+    case Opcode::ICmpSgt:
+    case Opcode::ICmpSle:
+    case Opcode::ICmpSge:
+    case Opcode::Shl:
+    case Opcode::Shr:
+      return true;
+    default:
+      return false;
+    }
+  }
+
+  void plan_local_registers() {
+    const std::vector<RvReg> temp_regs = {RvReg::T3, RvReg::T4, RvReg::T5,
+                                          RvReg::T6};
+    for (const std::unique_ptr<BasicBlock> &block : function_.blocks()) {
+      std::unordered_map<const Instruction *, int> index_by_inst;
+      std::vector<int> call_indices;
+      int index = 0;
+      for (const std::unique_ptr<Instruction> &inst : block->insts()) {
+        index_by_inst.emplace(inst.get(), index);
+        if (inst->opcode() == Opcode::Call) {
+          call_indices.push_back(index);
+        }
+        ++index;
+      }
+
+      struct Interval {
+        const Instruction *inst;
+        int start;
+        int end;
+      };
+      std::vector<Interval> intervals;
+      for (const std::unique_ptr<Instruction> &inst : block->insts()) {
+        if (!is_register_candidate(*inst) || is_direct_branch_condition(*inst)) {
+          continue;
+        }
+        const int start = index_by_inst[inst.get()];
+        int end = start;
+        bool eligible = !inst->uses().empty();
+        for (const User *user : inst->uses()) {
+          const Instruction *user_inst = dynamic_cast<const Instruction *>(user);
+          if (!user_inst || user_inst->parent() != block.get()) {
+            eligible = false;
+            break;
+          }
+          auto found = index_by_inst.find(user_inst);
+          if (found == index_by_inst.end() || found->second <= start) {
+            eligible = false;
+            break;
+          }
+          end = std::max(end, found->second);
+        }
+        for (int call_index : call_indices) {
+          if (call_index > start && call_index <= end) {
+            eligible = false;
+            break;
+          }
+        }
+        if (eligible) {
+          intervals.push_back(Interval{inst.get(), start, end});
+        }
+      }
+
+      std::vector<Interval> active;
+      std::unordered_map<RvReg, bool> used;
+      for (const Interval &interval : intervals) {
+        active.erase(std::remove_if(active.begin(), active.end(), [&](const Interval &item) {
+                       if (item.end < interval.start) {
+                         used[value_regs_[item.inst]] = false;
+                         return true;
+                       }
+                       return false;
+                     }),
+                     active.end());
+        for (RvReg reg : temp_regs) {
+          if (!used[reg]) {
+            value_regs_.emplace(interval.inst, reg);
+            used[reg] = true;
+            active.push_back(interval);
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -562,6 +819,7 @@ private:
   AsmWriter &writer_;
   FunctionFrame frame_;
   bool emitted_exit_ = false;
+  std::unordered_map<const Value *, RvReg> value_regs_;
   const std::vector<RvReg> arg_regs_ = {
       RvReg::A0, RvReg::A1, RvReg::A2, RvReg::A3,
       RvReg::A4, RvReg::A5, RvReg::A6, RvReg::A7,

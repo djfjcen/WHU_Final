@@ -188,10 +188,8 @@ TEST(Codegen, CompilesControlFlowAndComparisons) {
         "int main() { int x = 0; while (x < 3) { x = x + 1; } "
         "if (x == 3) { return 7; } return 9; }\n");
     EXPECT_NE(std::string::npos, asm_text.find(".Lmain_bb1:\n"));
-    EXPECT_NE(std::string::npos, asm_text.find("    slt t2, t0, t1\n"));
-    EXPECT_NE(std::string::npos, asm_text.find("    xor t2, t0, t1\n"));
-    EXPECT_NE(std::string::npos, asm_text.find("    sltiu t2, t2, 1\n"));
-    EXPECT_NE(std::string::npos, asm_text.find("    bne t0, x0, .Lmain_"));
+    EXPECT_NE(std::string::npos, asm_text.find("    blt t0, t1, .Lmain_"));
+    EXPECT_NE(std::string::npos, asm_text.find("    beq t0, t1, .Lmain_"));
     EXPECT_NE(std::string::npos, asm_text.find("    j .Lmain_exit\n"));
 }
 
@@ -300,6 +298,31 @@ TEST(Codegen, CompilesOptimizedSampleShape) {
     EXPECT_NE(std::string::npos, asm_text.find("    .section .text\n"));
     EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
     EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+}
+
+TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {
+    const std::string const_main = compile_source_to_asm(
+        "int main() { return 15; }\n", CodegenPipeline::Optim);
+    EXPECT_EQ(std::string::npos, const_main.find("addi sp, sp,"));
+
+    const std::string leaf = compile_source_to_asm(
+        "int f(int x) { int a = x + 1; int b = a * 2; return b + x; } "
+        "int main() { return f(5); }\n",
+        CodegenPipeline::Optim);
+    EXPECT_NE(std::string::npos, leaf.find("f:\n"));
+    EXPECT_EQ(std::string::npos, leaf.find("f:\n    sw ra,"));
+    EXPECT_NE(std::string::npos, leaf.find("    addi t2, t0, 1\n"));
+    EXPECT_NE(std::string::npos, leaf.find("    add t3, t2, x0\n"));
+    EXPECT_EQ(std::string::npos, leaf.find("addi t0, t0, 0"));
+}
+
+TEST(Codegen, P7RemovesFallthroughJumpAfterDirectBranch) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int x = 0; while (x < 3) { x = x + 1; } return x; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    blt t0, t1, .Lmain_edge_bb1_to_bb2\n"));
+    EXPECT_NE(std::string::npos, asm_text.find(".Lmain_edge_bb1_to_bb2:\n.Lmain_bb2:\n"));
+    EXPECT_EQ(std::string::npos,
+              asm_text.find(".Lmain_edge_bb1_to_bb2:\n    j .Lmain_bb2\n"));
 }
 
 TEST(Codegen, CompilesEndToEndCases) {
