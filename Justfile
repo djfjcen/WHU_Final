@@ -26,11 +26,15 @@ build-run file=sample flags="-dump-ast": build
 
 test: build
     {{build_dir}}/toyc-frontend-tests
+    {{build_dir}}/toyc-sema-tests
     {{build_dir}}/toyc-ir-tests
     {{build_dir}}/toyc-codegen-tests
 
 test-frontend: build
     {{build_dir}}/toyc-frontend-tests
+
+test-sema: build
+    {{build_dir}}/toyc-sema-tests
 
 test-ir: build
     {{build_dir}}/toyc-ir-tests
@@ -40,6 +44,7 @@ test-codegen: build
 
 test-filter filter: build
     {{build_dir}}/toyc-frontend-tests --gtest_filter='{{filter}}'
+    {{build_dir}}/toyc-sema-tests --gtest_filter='{{filter}}'
     {{build_dir}}/toyc-ir-tests --gtest_filter='{{filter}}'
     {{build_dir}}/toyc-codegen-tests --gtest_filter='{{filter}}'
 

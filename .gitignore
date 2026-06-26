@@ -21,10 +21,17 @@ _deps/
 *.exe
 *.out
 compiler
+build-oracle/toyc-compiler
 
 # Precompiled headers
 *.gch
 *.pch
+
+# Profiling / coverage data
+*.profraw
+*.profdata
+*.gcda
+*.gcno
 
 # Generated (clangd / IDE)
 compile_commands.json

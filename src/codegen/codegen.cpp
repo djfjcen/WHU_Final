@@ -445,8 +445,8 @@ private:
       if (!load_i32(incoming, RvReg::T0)) {
         return false;
       }
-      writer_.inst("sw", reg_name(RvReg::T0),
-                   offset_addr(frame_.phi_temp_offset(index), RvReg::Sp));
+      emit_store_from_base(RvReg::T0, RvReg::Sp,
+                           frame_.phi_temp_offset(index), RvReg::T2);
       ++index;
     }
 
@@ -455,10 +455,10 @@ private:
       if (inst->opcode() != Opcode::Phi) {
         break;
       }
-      writer_.inst("lw", reg_name(RvReg::T0),
-                   offset_addr(frame_.phi_temp_offset(index), RvReg::Sp));
-      writer_.inst("sw", reg_name(RvReg::T0),
-                   offset_addr(frame_.slot_offset(inst.get()), RvReg::Sp));
+      emit_load_from_base(RvReg::T0, RvReg::Sp,
+                          frame_.phi_temp_offset(index), RvReg::T0);
+      emit_store_from_base(RvReg::T0, RvReg::Sp,
+                           frame_.slot_offset(inst.get()), RvReg::T2);
       ++index;
     }
     return true;
@@ -489,8 +489,8 @@ private:
         if (!load_i32(inst.operand(i), RvReg::T0)) {
           return false;
         }
-        writer_.inst("sw", reg_name(RvReg::T0),
-                     offset_addr(static_cast<int>((i - 8) * 4), RvReg::Sp));
+        emit_store_from_base(RvReg::T0, RvReg::Sp,
+                             static_cast<int>((i - 8) * 4), RvReg::T2);
       }
     }
     writer_.inst("call", call.callee_name());
@@ -515,16 +515,14 @@ private:
     writer_.global(function_label(function_));
     writer_.label(function_label(function_));
     if (frame_.frame_size() > 0) {
-      writer_.inst("addi", reg_name(RvReg::Sp), reg_name(RvReg::Sp),
-                   std::to_string(-frame_.frame_size()));
+      emit_stack_adjust(-frame_.frame_size());
     }
     if (frame_.saves_ra()) {
-      writer_.inst("sw", reg_name(RvReg::Ra),
-                   offset_addr(frame_.ra_offset(), RvReg::Sp));
+      emit_store_from_base(RvReg::Ra, RvReg::Sp, frame_.ra_offset(), RvReg::T0);
     }
     for (unsigned i = 0; i < function_.params().size() && i < arg_regs_.size(); ++i) {
-      writer_.inst("sw", reg_name(arg_regs_[i]),
-                   offset_addr(frame_.register_param_offset(i), RvReg::Sp));
+      emit_store_from_base(arg_regs_[i], RvReg::Sp,
+                           frame_.register_param_offset(i), RvReg::T0);
     }
   }
 
@@ -533,12 +531,10 @@ private:
       return;
     }
     if (frame_.saves_ra()) {
-      writer_.inst("lw", reg_name(RvReg::Ra),
-                   offset_addr(frame_.ra_offset(), RvReg::Sp));
+      emit_load_from_base(RvReg::Ra, RvReg::Sp, frame_.ra_offset(), RvReg::T0);
     }
     if (frame_.frame_size() > 0) {
-      writer_.inst("addi", reg_name(RvReg::Sp), reg_name(RvReg::Sp),
-                   std::to_string(frame_.frame_size()));
+      emit_stack_adjust(frame_.frame_size());
     }
     if (function_.short_name() == "main" && options_.emit_exit_syscall) {
       materialize_i32(93, RvReg::A7);
@@ -561,12 +557,10 @@ private:
     if (value->value_kind() == ValueKind::Param) {
       const unsigned id = value->id();
       if (frame_.has_register_param_slot(id)) {
-        writer_.inst("lw", reg_name(dst),
-                     offset_addr(frame_.register_param_offset(id), RvReg::Sp));
+        emit_load_from_base(dst, RvReg::Sp, frame_.register_param_offset(id), dst);
         return true;
       }
-      writer_.inst("lw", reg_name(dst),
-                   offset_addr(frame_.stack_param_offset(id), RvReg::Sp));
+      emit_load_from_base(dst, RvReg::Sp, frame_.stack_param_offset(id), dst);
       return true;
     }
     if (frame_.has_slot(value)) {
@@ -575,8 +569,7 @@ private:
         emit_reg_copy(dst, reg->second);
         return true;
       }
-      writer_.inst("lw", reg_name(dst),
-                   offset_addr(frame_.slot_offset(value), RvReg::Sp));
+      emit_load_from_base(dst, RvReg::Sp, frame_.slot_offset(value), dst);
       return true;
     }
     return fail("codegen cannot materialize value " + value->name());
@@ -599,8 +592,7 @@ private:
       return true;
     }
     if (frame_.has_slot(ptr)) {
-      writer_.inst("addi", reg_name(dst), reg_name(RvReg::Sp),
-                   std::to_string(frame_.slot_offset(ptr)));
+      emit_add_imm(dst, RvReg::Sp, frame_.slot_offset(ptr), dst);
       return true;
     }
     return fail("codegen cannot materialize address " + ptr->name());
@@ -615,8 +607,7 @@ private:
       emit_reg_copy(reg->second, src);
       return true;
     }
-    writer_.inst("sw", reg_name(src),
-                 offset_addr(frame_.slot_offset(&inst), RvReg::Sp));
+    emit_store_from_base(src, RvReg::Sp, frame_.slot_offset(&inst), RvReg::T0);
     return true;
   }
 
@@ -673,6 +664,37 @@ private:
       return;
     }
     writer_.inst("addi", reg_name(dst), reg_name(src), std::to_string(imm));
+  }
+
+  void emit_add_imm(RvReg dst, RvReg src, int imm, RvReg scratch) {
+    if (fits_i12(imm)) {
+      emit_addi(dst, src, imm);
+      return;
+    }
+    materialize_i32(imm, scratch);
+    writer_.inst("add", reg_name(dst), reg_name(src), reg_name(scratch));
+  }
+
+  void emit_stack_adjust(int bytes) {
+    emit_add_imm(RvReg::Sp, RvReg::Sp, bytes, RvReg::T0);
+  }
+
+  void emit_load_from_base(RvReg dst, RvReg base, int offset, RvReg scratch) {
+    if (fits_i12(offset)) {
+      writer_.inst("lw", reg_name(dst), offset_addr(offset, base));
+      return;
+    }
+    emit_add_imm(scratch, base, offset, scratch);
+    writer_.inst("lw", reg_name(dst), offset_addr(0, scratch));
+  }
+
+  void emit_store_from_base(RvReg src, RvReg base, int offset, RvReg scratch) {
+    if (fits_i12(offset)) {
+      writer_.inst("sw", reg_name(src), offset_addr(offset, base));
+      return;
+    }
+    emit_add_imm(scratch, base, offset, scratch);
+    writer_.inst("sw", reg_name(src), offset_addr(0, scratch));
   }
 
   void emit_reg_copy(RvReg dst, RvReg src) {

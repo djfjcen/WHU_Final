@@ -93,6 +93,28 @@ std::string compile_source_to_asm(const std::string& source,
     return out.str();
 }
 
+void expect_stack_immediates_fit(const std::string& asm_text) {
+    std::istringstream lines(asm_text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string addi_sp = "addi sp, sp, ";
+        const std::size_t addi_pos = line.find(addi_sp);
+        if (addi_pos != std::string::npos) {
+            const int imm = std::stoi(line.substr(addi_pos + addi_sp.size()));
+            EXPECT_TRUE(fits_i12(imm)) << line;
+        }
+
+        const std::size_t sp_addr = line.find("(sp)");
+        if (sp_addr == std::string::npos) {
+            continue;
+        }
+        const std::size_t comma = line.rfind(',', sp_addr);
+        ASSERT_NE(std::string::npos, comma) << line;
+        const int offset = std::stoi(line.substr(comma + 1, sp_addr - comma - 1));
+        EXPECT_TRUE(fits_i12(offset)) << line;
+    }
+}
+
 TEST(Codegen, EmitsReturnConstMain) {
     Module module = make_return_const_module(42);
     DiagnosticEngine diagnostics;
@@ -259,6 +281,23 @@ TEST(Codegen, CompilesMoreThanEightArgs) {
     EXPECT_NE(std::string::npos, asm_text.find("    lw t1, 144(sp)\n"));
     EXPECT_NE(std::string::npos, asm_text.find("    sw t0, 0(sp)\n"));
     EXPECT_NE(std::string::npos, asm_text.find("    call sum9\n"));
+}
+
+TEST(Codegen, CompilesLargeStackFrameWithoutIllegalImmediates) {
+    std::ostringstream source;
+    source << "int pick9(int a, int b, int c, int d, int e, int f, int g, int h, int i) {\n";
+    for (int index = 0; index < 700; ++index) {
+        source << "int v" << index << " = " << index << ";\n";
+    }
+    source << "return i + v699;\n";
+    source << "}\n";
+    source << "int main() { return pick9(1,2,3,4,5,6,7,8,9); }\n";
+
+    const std::string asm_text = compile_source_to_asm(source.str());
+    expect_stack_immediates_fit(asm_text);
+    EXPECT_NE(std::string::npos, asm_text.find("    add sp, sp, t0\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    add t0, sp, t0\n"));
+    EXPECT_EQ(std::string::npos, asm_text.find("2048(sp)"));
 }
 
 TEST(Codegen, CompilesMem2RegIfElsePhi) {
