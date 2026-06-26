@@ -105,6 +105,12 @@ add_executable(toyc-codegen-tests
 target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
 toyc_enable_warnings(toyc-codegen-tests)
 
+add_executable(toyc-sema-tests
+    test/sema/sema_tests.cpp
+)
+target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-sema-tests)
+
 if(TOYC_ENABLE_COVERAGE)
     find_program(LLVM_COV llvm-cov)
     find_program(LLVM_PROFDATA llvm-profdata)
