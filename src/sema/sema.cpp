@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -42,6 +43,24 @@ public:
     }
 
 private:
+    struct SuppressConstEvalGuard {
+        Analyzer& analyzer;
+        explicit SuppressConstEvalGuard(Analyzer& analyzer_ref) : analyzer(analyzer_ref) {
+            ++analyzer.suppress_const_eval_depth_;
+        }
+        ~SuppressConstEvalGuard() { --analyzer.suppress_const_eval_depth_; }
+    };
+
+    bool const_eval_enabled() const { return suppress_const_eval_depth_ == 0; }
+
+    std::optional<int> lookup_const_value(const Expr& expr) const {
+        auto it = result_.const_values.find(&expr);
+        if (it == result_.const_values.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    }
+
     void push_scope() { scopes_.emplace_back(); }
     void pop_scope() { scopes_.pop_back(); }
 
@@ -339,28 +358,35 @@ private:
     ExprValueType analyze_binary(const Expr& expr, const BinaryExpr& binary) {
         require_int_expr(*binary.lhs, "left operand");
 
+        std::optional<int> short_circuit_value;
         if (binary.op == BinaryOp::And) {
-            if (auto lhs_const = eval_const_expr(*binary.lhs)) {
+            if (auto lhs_const = lookup_const_value(*binary.lhs)) {
                 if (*lhs_const == 0) {
-                    result_.expr_types[&expr] = ExprValueType::Int;
-                    result_.const_values[&expr] = 0;
-                    return ExprValueType::Int;
+                    short_circuit_value = 0;
                 }
             }
         } else if (binary.op == BinaryOp::Or) {
-            if (auto lhs_const = eval_const_expr(*binary.lhs)) {
+            if (auto lhs_const = lookup_const_value(*binary.lhs)) {
                 if (*lhs_const != 0) {
-                    result_.expr_types[&expr] = ExprValueType::Int;
-                    result_.const_values[&expr] = 1;
-                    return ExprValueType::Int;
+                    short_circuit_value = 1;
                 }
             }
         }
 
+        if (short_circuit_value) {
+            SuppressConstEvalGuard guard(*this);
+            require_int_expr(*binary.rhs, "right operand");
+            result_.expr_types[&expr] = ExprValueType::Int;
+            result_.const_values[&expr] = *short_circuit_value;
+            return ExprValueType::Int;
+        }
+
         require_int_expr(*binary.rhs, "right operand");
         result_.expr_types[&expr] = ExprValueType::Int;
-        if (auto value = eval_const_expr(expr)) {
-            result_.const_values[&expr] = *value;
+        if (const_eval_enabled()) {
+            if (auto value = eval_const_expr(expr)) {
+                result_.const_values[&expr] = *value;
+            }
         }
         return ExprValueType::Int;
     }
@@ -368,8 +394,10 @@ private:
     ExprValueType analyze_unary(const Expr& expr, const UnaryExpr& unary) {
         require_int_expr(*unary.operand, "unary operand");
         result_.expr_types[&expr] = ExprValueType::Int;
-        if (auto value = eval_const_expr(expr)) {
-            result_.const_values[&expr] = *value;
+        if (const_eval_enabled()) {
+            if (auto value = eval_const_expr(expr)) {
+                result_.const_values[&expr] = *value;
+            }
         }
         return ExprValueType::Int;
     }
@@ -411,9 +439,19 @@ private:
     }
 
     std::optional<int> eval_const_expr(const Expr& expr) {
+        if (!const_eval_enabled()) {
+            return std::nullopt;
+        }
+        if (auto cached = lookup_const_value(expr)) {
+            return cached;
+        }
+
         switch (expr.kind) {
-            case Expr::Kind::IntLiteral:
-                return expr.int_literal.value;
+            case Expr::Kind::IntLiteral: {
+                const int value = expr.int_literal.value;
+                result_.const_values[&expr] = value;
+                return value;
+            }
             case Expr::Kind::Ident: {
                 Symbol* symbol = resolve(expr.ident.name);
                 if (!symbol || symbol->kind != SymbolKind::Object || !symbol->const_value) {
@@ -446,13 +484,16 @@ private:
                             return std::nullopt;
                         }
                         if (*lhs == 0) {
+                            result_.const_values[&expr] = 0;
                             return 0;
                         }
                         auto rhs = eval_const_expr(*expr.binary.rhs);
                         if (!rhs) {
                             return std::nullopt;
                         }
-                        return static_cast<int>(*rhs != 0);
+                        const int value = static_cast<int>(*rhs != 0);
+                        result_.const_values[&expr] = value;
+                        return value;
                     }
                     case BinaryOp::Or: {
                         auto lhs = eval_const_expr(*expr.binary.lhs);
@@ -460,13 +501,16 @@ private:
                             return std::nullopt;
                         }
                         if (*lhs != 0) {
+                            result_.const_values[&expr] = 1;
                             return 1;
                         }
                         auto rhs = eval_const_expr(*expr.binary.rhs);
                         if (!rhs) {
                             return std::nullopt;
                         }
-                        return static_cast<int>(*rhs != 0);
+                        const int value = static_cast<int>(*rhs != 0);
+                        result_.const_values[&expr] = value;
+                        return value;
                     }
                     default:
                         break;
@@ -477,41 +521,60 @@ private:
                 if (!lhs || !rhs) {
                     return std::nullopt;
                 }
+                std::optional<int> value;
                 switch (expr.binary.op) {
                     case BinaryOp::Add:
-                        return *lhs + *rhs;
+                        value = *lhs + *rhs;
+                        break;
                     case BinaryOp::Sub:
-                        return *lhs - *rhs;
+                        value = *lhs - *rhs;
+                        break;
                     case BinaryOp::Mul:
-                        return *lhs * *rhs;
+                        value = *lhs * *rhs;
+                        break;
                     case BinaryOp::Div:
                         if (*rhs == 0) {
-                            error(expr.binary.loc, "division by zero in compile-time constant expression");
+                            if (const_eval_diagnosed_.insert(&expr).second) {
+                                error(expr.binary.loc,
+                                      "division by zero in compile-time constant expression");
+                            }
                             return std::nullopt;
                         }
-                        return *lhs / *rhs;
+                        value = *lhs / *rhs;
+                        break;
                     case BinaryOp::Mod:
                         if (*rhs == 0) {
-                            error(expr.binary.loc, "modulo by zero in compile-time constant expression");
+                            if (const_eval_diagnosed_.insert(&expr).second) {
+                                error(expr.binary.loc,
+                                      "modulo by zero in compile-time constant expression");
+                            }
                             return std::nullopt;
                         }
-                        return *lhs % *rhs;
-                    case BinaryOp::Lt:
-                        return *lhs < *rhs;
-                    case BinaryOp::Le:
-                        return *lhs <= *rhs;
-                    case BinaryOp::Gt:
-                        return *lhs > *rhs;
-                    case BinaryOp::Ge:
-                        return *lhs >= *rhs;
-                    case BinaryOp::Eq:
-                        return *lhs == *rhs;
-                    case BinaryOp::Ne:
-                        return *lhs != *rhs;
-                    default:
+                        value = *lhs % *rhs;
                         break;
+                    case BinaryOp::Lt:
+                        value = *lhs < *rhs;
+                        break;
+                    case BinaryOp::Le:
+                        value = *lhs <= *rhs;
+                        break;
+                    case BinaryOp::Gt:
+                        value = *lhs > *rhs;
+                        break;
+                    case BinaryOp::Ge:
+                        value = *lhs >= *rhs;
+                        break;
+                    case BinaryOp::Eq:
+                        value = *lhs == *rhs;
+                        break;
+                    case BinaryOp::Ne:
+                        value = *lhs != *rhs;
+                        break;
+                    default:
+                        return std::nullopt;
                 }
-                return std::nullopt;
+                result_.const_values[&expr] = *value;
+                return value;
             }
             case Expr::Kind::Call:
                 return std::nullopt;
@@ -579,6 +642,8 @@ private:
     std::vector<std::unordered_map<std::string, Symbol>> scopes_;
     const FuncDef* current_func_ = nullptr;
     int loop_depth_ = 0;
+    int suppress_const_eval_depth_ = 0;
+    std::unordered_set<const Expr*> const_eval_diagnosed_;
 };
 
 }  // namespace
