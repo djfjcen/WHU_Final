@@ -14,6 +14,8 @@ const char* diagnostic_stage_name(DiagnosticStage stage) {
             return "ast";
         case DiagnosticStage::Sema:
             return "sema";
+        case DiagnosticStage::Codegen:
+            return "codegen";
         case DiagnosticStage::Driver:
             return "driver";
     }

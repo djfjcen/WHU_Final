@@ -48,6 +48,9 @@ add_library(toyc-core
     src/ir/irgen.cpp
     src/ir/mem2reg.cpp
     src/ir/optim.cpp
+    src/codegen/asm_writer.cpp
+    src/codegen/codegen.cpp
+    src/codegen/riscv.cpp
 )
 
 target_include_directories(toyc-core PUBLIC include)
@@ -95,6 +98,12 @@ add_executable(toyc-ir-tests
 target_include_directories(toyc-ir-tests PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(toyc-ir-tests PRIVATE toyc-core GTest::gtest_main)
 toyc_enable_warnings(toyc-ir-tests)
+
+add_executable(toyc-codegen-tests
+    test/codegen/codegen_tests.cpp
+)
+target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-codegen-tests)
 
 if(TOYC_ENABLE_COVERAGE)
     find_program(LLVM_COV llvm-cov)

@@ -1,0 +1,8 @@
+int g = 1;
+const int step = 4;
+
+int main() {
+    g = g + step;
+    g = g * 2;
+    return g;
+}

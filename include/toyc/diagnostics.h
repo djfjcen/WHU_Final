@@ -9,7 +9,7 @@
 
 namespace toyc {
 
-enum class DiagnosticStage { Lex, Parse, Ast, Sema, Driver };
+enum class DiagnosticStage { Lex, Parse, Ast, Sema, Codegen, Driver };
 
 enum class DiagnosticLevel { Error, Warning };
 

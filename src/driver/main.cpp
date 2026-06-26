@@ -1,4 +1,5 @@
 #include "toyc/ast_printer.h"
+#include "toyc/codegen.h"
 #include "toyc/diagnostics.h"
 #include "toyc/ir.h"
 #include "toyc/ir_printer.h"
@@ -14,6 +15,26 @@
 #include <memory>
 
 namespace {
+
+std::unique_ptr<toyc::Module> build_ir(const toyc::CompUnit& unit,
+                                       const toyc::CompilerOptions& options,
+                                       toyc::DiagnosticEngine& diagnostics) {
+    toyc::SemaResult sema = toyc::analyze(unit, diagnostics);
+    if (diagnostics.has_errors() || !sema.ok) {
+        return nullptr;
+    }
+    std::unique_ptr<toyc::Module> ir = toyc::generate(unit, sema, diagnostics);
+    if (diagnostics.has_errors() || !ir) {
+        return nullptr;
+    }
+    if (options.opt_mode || options.mem2reg_only) {
+        toyc::mem2reg(*ir);
+    }
+    if (options.opt_mode) {
+        toyc::run_optim(*ir);
+    }
+    return ir;
+}
 
 int dump_tokens(toyc::Lexer& lexer, toyc::DiagnosticEngine& diagnostics) {
     while (true) {
@@ -56,30 +77,27 @@ int run_frontend(toyc::CompilerOptions options) {
     }
 
     if (options.dump_ir) {
-        toyc::SemaResult sema = toyc::analyze(*unit, diagnostics);
-        if (diagnostics.has_errors() || !sema.ok) {
+        std::unique_ptr<toyc::Module> ir = build_ir(*unit, options, diagnostics);
+        if (!ir) {
             diagnostics.emit_all(std::cerr);
             return 1;
-        }
-        std::unique_ptr<toyc::Module> ir = toyc::generate(*unit, sema, diagnostics);
-        if (diagnostics.has_errors() || !ir) {
-            diagnostics.emit_all(std::cerr);
-            return 1;
-        }
-        if (options.opt_mode || options.mem2reg_only) {
-            toyc::mem2reg(*ir);
-        }
-        if (options.opt_mode) {
-            toyc::run_optim(*ir);
         }
         toyc::print_module(*ir, std::cerr);
         return 0;
     }
 
-    diagnostics.error(toyc::DiagnosticStage::Driver, toyc::SourceLoc{0, 0},
-                      "codegen not implemented yet; use -dump-ast, -dump-tokens, or -dump-ir");
-    diagnostics.emit_all(std::cerr);
-    return 1;
+    std::unique_ptr<toyc::Module> ir = build_ir(*unit, options, diagnostics);
+    if (!ir) {
+        diagnostics.emit_all(std::cerr);
+        return 1;
+    }
+    toyc::CodegenOptions cg_options;
+    cg_options.opt_mode = options.opt_mode;
+    if (!toyc::emit_riscv(*ir, cg_options, diagnostics, std::cout)) {
+        diagnostics.emit_all(std::cerr);
+        return 1;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -92,6 +110,5 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    (void)options.opt_mode;
     return run_frontend(options);
 }

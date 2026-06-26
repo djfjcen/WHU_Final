@@ -127,14 +127,14 @@ void IRGenerator::visit_if_stmt(const IfStmt& node) {
 
     builder_->set_insert_point(then_bb);
     walk_stmt(*node.then_branch, *this);
-    if (!then_bb->is_terminated()) {
+    if (!builder_->insert_point()->is_terminated()) {
         builder_->create_br(merge_bb);
     }
 
     if (else_bb) {
         builder_->set_insert_point(else_bb);
         walk_stmt(*node.else_branch, *this);
-        if (!else_bb->is_terminated()) {
+        if (!builder_->insert_point()->is_terminated()) {
             builder_->create_br(merge_bb);
         }
     }
@@ -155,7 +155,7 @@ void IRGenerator::visit_while_stmt(const WhileStmt& node) {
     loops_.push_back({cond_bb, exit_bb});
     builder_->set_insert_point(body_bb);
     walk_stmt(*node.body, *this);
-    if (!body_bb->is_terminated()) {
+    if (!builder_->insert_point()->is_terminated()) {
         builder_->create_br(cond_bb);
     }
     loops_.pop_back();
