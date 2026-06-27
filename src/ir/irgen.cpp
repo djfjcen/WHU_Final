@@ -87,7 +87,11 @@ void IRGenerator::visit_func_def(const FuncDef& func) {
 }
 
 void IRGenerator::visit_block_stmt(const BlockStmt& node) {
-    walk_block(node, *this);
+    for (const std::unique_ptr<Stmt>& stmt : node.body) {
+        if (!stmt) continue;
+        if (builder_->insert_point()->is_terminated()) break;
+        visit_stmt(*stmt);
+    }
 }
 void IRGenerator::visit_empty_stmt(const EmptyStmt&) {}
 void IRGenerator::visit_expr_stmt(const ExprStmt& node) { eval_expr(*node.expr); }
