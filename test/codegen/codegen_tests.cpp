@@ -104,6 +104,21 @@ void expect_stack_immediates_fit(const std::string& asm_text) {
             EXPECT_TRUE(fits_i12(imm)) << line;
         }
 
+        const std::string lui = "lui ";
+        const std::size_t lui_pos = line.find(lui);
+        if (lui_pos != std::string::npos) {
+            const std::size_t comma = line.find(',', lui_pos);
+            ASSERT_NE(std::string::npos, comma) << line;
+            std::size_t start = line.find_first_not_of(' ', comma + 1);
+            ASSERT_NE(std::string::npos, start) << line;
+            const char first = line[start];
+            if ((first >= '0' && first <= '9') || first == '-') {
+                const int imm = std::stoi(line.substr(start));
+                EXPECT_GE(imm, 0) << line;
+                EXPECT_LE(imm, 1048575) << line;
+            }
+        }
+
         const std::size_t sp_addr = line.find("(sp)");
         if (sp_addr == std::string::npos) {
             continue;
@@ -184,6 +199,21 @@ TEST(Codegen, CompilesLargeReturnConstantWithoutPseudo) {
     const std::string asm_text = compile_source_to_asm("int main() { return 1048577; }\n");
     EXPECT_NE(std::string::npos, asm_text.find("    lui a0, 256\n"));
     EXPECT_NE(std::string::npos, asm_text.find("    addi a0, a0, 1\n"));
+    EXPECT_EQ(std::string::npos, asm_text.find("    li "));
+}
+
+TEST(Codegen, CompilesMaxIntReturnConstantWithLegalLuiImmediate) {
+    const std::string asm_text = compile_source_to_asm("int main() { return 2147483647; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    lui a0, 524288\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    addi a0, a0, -1\n"));
+    EXPECT_EQ(std::string::npos, asm_text.find("    li "));
+}
+
+TEST(Codegen, CompilesNegativeLargeReturnConstantWithLegalLuiImmediate) {
+    const std::string asm_text = compile_source_to_asm("int main() { return -1048577; }\n");
+    EXPECT_NE(std::string::npos, asm_text.find("    lui a0, 1048320\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("    addi a0, a0, -1\n"));
+    EXPECT_EQ(std::string::npos, asm_text.find("    lui a0, -256\n"));
     EXPECT_EQ(std::string::npos, asm_text.find("    li "));
 }
 

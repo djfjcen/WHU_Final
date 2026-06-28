@@ -621,8 +621,12 @@ private:
       return;
     }
     const int64_t rounded = static_cast<int64_t>(value) + 0x800;
-    const int64_t hi = rounded >> 12;
-    const int64_t lo = static_cast<int64_t>(value) - (hi << 12);
+    const int64_t raw_hi = rounded >> 12;
+    int64_t hi = raw_hi;
+    if (hi < 0) {
+      hi += 1 << 20;
+    }
+    const int64_t lo = static_cast<int64_t>(value) - (raw_hi << 12);
     writer_.inst("lui", reg_name(dst), std::to_string(hi));
     if (lo != 0) {
       writer_.inst("addi", reg_name(dst), reg_name(dst), std::to_string(lo));
