@@ -235,6 +235,23 @@ TEST(Codegen, CompilesOrFalseEdgeBeforeTrueEdgeCopy) {
     EXPECT_NE(std::string::npos, asm_text.find(".Lmain_bb1:\n    call side\n"));
 }
 
+TEST(Codegen, CompilesIfElseBothReturnWithoutDanglingMerge) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int a = 0; int b = 1; "
+        "if (a && (b / a)) { return 1; } else { return 0; } }\n");
+    EXPECT_FALSE(asm_text.empty());
+    EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+}
+
+TEST(Codegen, CompilesLocalDeclarationAfterTerminatedBranch) {
+    const std::string asm_text = compile_source_to_asm(
+        "int f(int n) { if (n <= 1) { return 1; } int x = n + 2; return x; } "
+        "int main() { return f(2); }\n");
+    EXPECT_FALSE(asm_text.empty());
+    EXPECT_NE(std::string::npos, asm_text.find("f:\n"));
+    EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+}
+
 TEST(Codegen, CompilesRuntimeNegation) {
     const std::string asm_text = compile_source_to_asm(
         "int main() { int x = 9; return -x; }\n");
@@ -348,6 +365,24 @@ TEST(Codegen, CompilesOptimizedSampleShape) {
     EXPECT_NE(std::string::npos, asm_text.find("    .section .text\n"));
     EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
     EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+}
+
+TEST(Codegen, CompilesOptimizedLoopLocalDeclaration) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int i = 0; while (i < 2) { int j = 1; i = i + j; } return i; }\n",
+        CodegenPipeline::Optim);
+    EXPECT_FALSE(asm_text.empty());
+    EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+}
+
+TEST(Codegen, CompilesOptimizedMergedPhiPredecessor) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int x = 0; int y = 0; "
+        "if (!((0 > 0 && 1 < 0) || (2 > 0 && 0 < 0)) && (1 > 0 || 0 < 0)) { x = 1; } "
+        "return x + y; }\n",
+        CodegenPipeline::Optim);
+    EXPECT_FALSE(asm_text.empty());
+    EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
 }
 
 TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {

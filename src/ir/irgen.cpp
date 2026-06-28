@@ -19,8 +19,12 @@ FuncRet to_func_ret(FuncReturnType t) {
 Value* IRGenerator::alloca_in_entry() {
     auto inst = std::make_unique<AllocaInst>(module_->fresh_id());
     Value* raw = inst.get();
-    alloca_pt_ = entry_->insts().insert(alloca_pt_, std::move(inst));
-    ++alloca_pt_;
+    auto insert_pos = entry_->insts().begin();
+    while (insert_pos != entry_->insts().end() &&
+           (*insert_pos)->opcode() == Opcode::Alloca) {
+        ++insert_pos;
+    }
+    entry_->insts().insert(insert_pos, std::move(inst));
     return raw;
 }
 
@@ -70,7 +74,6 @@ void IRGenerator::visit_func_def(const FuncDef& func) {
     Function* fn = module_->create_function(func.name, to_func_ret(func.return_type),
                                             static_cast<unsigned>(func.params.size()));
     entry_ = fn->create_block();
-    alloca_pt_ = entry_->insts().begin();
     builder_ = std::make_unique<IRBuilder>(*module_, entry_);
     current_ret_ = func.return_type;
 
@@ -121,26 +124,45 @@ void IRGenerator::visit_var_decl_stmt(const VarDeclStmt& node) {
 void IRGenerator::visit_if_stmt(const IfStmt& node) {
     Value* cond = eval_expr(*node.condition);
     BasicBlock* then_bb = entry_->parent()->create_block();
-    BasicBlock* else_bb = node.else_branch ? entry_->parent()->create_block() : nullptr;
-    BasicBlock* merge_bb = entry_->parent()->create_block();
-    if (else_bb) {
+    if (node.else_branch) {
+        BasicBlock* else_bb = entry_->parent()->create_block();
         builder_->create_cond_br(cond, then_bb, else_bb);
-    } else {
-        builder_->create_cond_br(cond, then_bb, merge_bb);
+
+        builder_->set_insert_point(then_bb);
+        walk_stmt(*node.then_branch, *this);
+        BasicBlock* then_end = builder_->insert_point();
+        const bool then_open = !then_end->is_terminated();
+
+        builder_->set_insert_point(else_bb);
+        walk_stmt(*node.else_branch, *this);
+        BasicBlock* else_end = builder_->insert_point();
+        const bool else_open = !else_end->is_terminated();
+
+        if (then_open || else_open) {
+            BasicBlock* merge_bb = entry_->parent()->create_block();
+            if (then_open) {
+                builder_->set_insert_point(then_end);
+                builder_->create_br(merge_bb);
+            }
+            if (else_open) {
+                builder_->set_insert_point(else_end);
+                builder_->create_br(merge_bb);
+            }
+            builder_->set_insert_point(merge_bb);
+            return;
+        }
+
+        builder_->set_insert_point(else_end);
+        return;
     }
+
+    BasicBlock* merge_bb = entry_->parent()->create_block();
+    builder_->create_cond_br(cond, then_bb, merge_bb);
 
     builder_->set_insert_point(then_bb);
     walk_stmt(*node.then_branch, *this);
     if (!builder_->insert_point()->is_terminated()) {
         builder_->create_br(merge_bb);
-    }
-
-    if (else_bb) {
-        builder_->set_insert_point(else_bb);
-        walk_stmt(*node.else_branch, *this);
-        if (!builder_->insert_point()->is_terminated()) {
-            builder_->create_br(merge_bb);
-        }
     }
 
     builder_->set_insert_point(merge_bb);

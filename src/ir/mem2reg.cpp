@@ -200,6 +200,14 @@ struct Mem2RegCtx {
         rename_block(fn.entry(), stacks);
     }
 
+    Value* current_value(AllocaInst* a, Stacks& stacks) {
+        auto found = stacks.find(a);
+        if (found == stacks.end() || found->second.empty()) {
+            return mod->get_constant(0);
+        }
+        return found->second.back();
+    }
+
     AllocaInst* alloca_of(Value* v) const {
         if (v->value_kind() != ValueKind::Register) return nullptr;
         if (static_cast<Instruction*>(v)->opcode() != Opcode::Alloca) return nullptr;
@@ -228,8 +236,7 @@ struct Mem2RegCtx {
             if (op == Opcode::Load) {
                 AllocaInst* a = alloca_of(inst->operand(0));
                 if (a) {
-                    assert(!stacks[a].empty() && "load before any store");
-                    inst->replace_all_uses_with(stacks[a].back());
+                    inst->replace_all_uses_with(current_value(a, stacks));
                 }
             } else if (op == Opcode::Store) {
                 AllocaInst* a = alloca_of(inst->operand(0));
@@ -247,8 +254,7 @@ struct Mem2RegCtx {
                 PhiInst* phi = static_cast<PhiInst*>(inst.get());
                 auto it = phi_alloca.find(phi);
                 if (it == phi_alloca.end()) continue;
-                assert(!stacks[it->second].empty() && "phi edge with no defining value");
-                phi->add_incoming(stacks[it->second].back(), bb);
+                phi->add_incoming(current_value(it->second, stacks), bb);
             }
         }
 

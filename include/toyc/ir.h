@@ -208,6 +208,13 @@ public:
     explicit PhiInst(unsigned id) : Instruction(Opcode::Phi, Type::I32, id) {}
     void add_incoming(Value* value, BasicBlock* block);
     const std::vector<BasicBlock*>& incoming_blocks() const { return incoming_blocks_; }
+    void replace_incoming_block(BasicBlock* old_block, BasicBlock* new_block) {
+        for (BasicBlock*& block : incoming_blocks_) {
+            if (block == old_block) {
+                block = new_block;
+            }
+        }
+    }
 
     // Reorder incoming (value,block) pairs to match pred_order. Used by mem2reg
     // so SSA textual output is byte-stable regardless of rename DFS visit order.

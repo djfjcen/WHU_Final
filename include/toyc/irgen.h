@@ -63,7 +63,6 @@ private:
     std::unique_ptr<Module> module_;
     std::unique_ptr<IRBuilder> builder_;
     BasicBlock* entry_ = nullptr;
-    std::list<std::unique_ptr<Instruction>>::iterator alloca_pt_;
     FuncReturnType current_ret_ = FuncReturnType::Int;
     FuncSignatureMap func_sigs_;
 

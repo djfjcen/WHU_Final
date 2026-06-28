@@ -237,6 +237,20 @@ bool cfs_merge_blocks(Function& fn) {
             if (inst->opcode() == Opcode::Phi) { b_has_phi = true; break; }
         }
         if (b_has_phi) break;
+        Instruction* b_term = b->terminator();
+        std::vector<BasicBlock*> b_succs;
+        if (b_term && b_term->opcode() == Opcode::Br) {
+            b_succs.push_back(static_cast<BasicBlock*>(b_term->operand(0)));
+        } else if (b_term && b_term->opcode() == Opcode::CondBr) {
+            b_succs.push_back(static_cast<BasicBlock*>(b_term->operand(1)));
+            b_succs.push_back(static_cast<BasicBlock*>(b_term->operand(2)));
+        }
+        for (BasicBlock* succ : b_succs) {
+            for (const std::unique_ptr<Instruction>& inst : succ->insts()) {
+                if (inst->opcode() != Opcode::Phi) break;
+                static_cast<PhiInst*>(inst.get())->replace_incoming_block(b, a);
+            }
+        }
         Instruction* br = a->terminator();
         for (unsigned k = 0; k < br->num_operands(); ++k) br->operand(k)->remove_use(br);
         a->insts().pop_back();  // drop a's br
