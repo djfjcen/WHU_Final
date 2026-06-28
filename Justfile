@@ -7,10 +7,10 @@ default:
     just --list
 
 configure:
-    cmake -S . -B {{build_dir}} -DCMAKE_BUILD_TYPE=Debug
+    cmake -S . -B {{build_dir}} -DTOYC_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
 
 configure-coverage:
-    cmake -S . -B {{build_dir}} -DTOYC_ENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
+    cmake -S . -B {{build_dir}} -DTOYC_BUILD_TESTS=ON -DTOYC_ENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug
 
 build:
     cmake --build {{build_dir}}
@@ -24,25 +24,25 @@ run file=sample flags="-dump-ast":
 build-run file=sample flags="-dump-ast": build
     {{build_dir}}/toyc-compiler {{flags}} < {{file}}
 
-test: build
+test: configure build
     {{build_dir}}/toyc-frontend-tests
     {{build_dir}}/toyc-sema-tests
     {{build_dir}}/toyc-ir-tests
     {{build_dir}}/toyc-codegen-tests
 
-test-frontend: build
+test-frontend: configure build
     {{build_dir}}/toyc-frontend-tests
 
-test-sema: build
+test-sema: configure build
     {{build_dir}}/toyc-sema-tests
 
-test-ir: build
+test-ir: configure build
     {{build_dir}}/toyc-ir-tests
 
-test-codegen: build
+test-codegen: configure build
     {{build_dir}}/toyc-codegen-tests
 
-test-filter filter: build
+test-filter filter: configure build
     {{build_dir}}/toyc-frontend-tests --gtest_filter='{{filter}}'
     {{build_dir}}/toyc-sema-tests --gtest_filter='{{filter}}'
     {{build_dir}}/toyc-ir-tests --gtest_filter='{{filter}}'

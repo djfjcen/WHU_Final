@@ -6,20 +6,27 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TOYC_ENABLE_COVERAGE "Build frontend test targets with coverage instrumentation" OFF)
+option(TOYC_BUILD_TESTS "Build GoogleTest test targets" OFF)
 
-include(FetchContent)
-
-FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.14.0
-)
-
-if(MSVC)
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+if(TOYC_ENABLE_COVERAGE AND NOT TOYC_BUILD_TESTS)
+    set(TOYC_BUILD_TESTS ON CACHE BOOL "Build GoogleTest test targets" FORCE)
 endif()
 
-FetchContent_MakeAvailable(googletest)
+if(TOYC_BUILD_TESTS)
+    include(FetchContent)
+
+    FetchContent_Declare(
+        googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.14.0
+    )
+
+    if(MSVC)
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    endif()
+
+    FetchContent_MakeAvailable(googletest)
+endif()
 
 function(toyc_enable_warnings target)
     if(MSVC)
@@ -74,42 +81,44 @@ add_executable(toyc-compiler
 target_link_libraries(toyc-compiler PRIVATE toyc-core)
 toyc_enable_warnings(toyc-compiler)
 
-add_executable(toyc-frontend-tests
-    test/support/frontend_fixture.cpp
-    test/frontend/token_tests.cpp
-    test/frontend/lexer_tests.cpp
-    test/frontend/parser_tests.cpp
-    test/frontend/ast_tests.cpp
-    test/frontend/ast_access_tests.cpp
-    test/frontend/ast_printer_tests.cpp
-    test/frontend/ast_visitor_tests.cpp
-    test/driver/options_tests.cpp
-    test/driver/diagnostics_tests.cpp
-)
-target_include_directories(toyc-frontend-tests PRIVATE test/support)
-target_link_libraries(toyc-frontend-tests PRIVATE toyc-core GTest::gtest_main)
-toyc_enable_warnings(toyc-frontend-tests)
+if(TOYC_BUILD_TESTS)
+    add_executable(toyc-frontend-tests
+        test/support/frontend_fixture.cpp
+        test/frontend/token_tests.cpp
+        test/frontend/lexer_tests.cpp
+        test/frontend/parser_tests.cpp
+        test/frontend/ast_tests.cpp
+        test/frontend/ast_access_tests.cpp
+        test/frontend/ast_printer_tests.cpp
+        test/frontend/ast_visitor_tests.cpp
+        test/driver/options_tests.cpp
+        test/driver/diagnostics_tests.cpp
+    )
+    target_include_directories(toyc-frontend-tests PRIVATE test/support)
+    target_link_libraries(toyc-frontend-tests PRIVATE toyc-core GTest::gtest_main)
+    toyc_enable_warnings(toyc-frontend-tests)
 
-add_executable(toyc-ir-tests
-    test/support/ir_fixture.cpp
-    test/ir/ir_tests.cpp
-    test/ir/ir_pipeline_tests.cpp
-)
-target_include_directories(toyc-ir-tests PRIVATE ${CMAKE_SOURCE_DIR})
-target_link_libraries(toyc-ir-tests PRIVATE toyc-core GTest::gtest_main)
-toyc_enable_warnings(toyc-ir-tests)
+    add_executable(toyc-ir-tests
+        test/support/ir_fixture.cpp
+        test/ir/ir_tests.cpp
+        test/ir/ir_pipeline_tests.cpp
+    )
+    target_include_directories(toyc-ir-tests PRIVATE ${CMAKE_SOURCE_DIR})
+    target_link_libraries(toyc-ir-tests PRIVATE toyc-core GTest::gtest_main)
+    toyc_enable_warnings(toyc-ir-tests)
 
-add_executable(toyc-codegen-tests
-    test/codegen/codegen_tests.cpp
-)
-target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
-toyc_enable_warnings(toyc-codegen-tests)
+    add_executable(toyc-codegen-tests
+        test/codegen/codegen_tests.cpp
+    )
+    target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
+    toyc_enable_warnings(toyc-codegen-tests)
 
-add_executable(toyc-sema-tests
-    test/sema/sema_tests.cpp
-)
-target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
-toyc_enable_warnings(toyc-sema-tests)
+    add_executable(toyc-sema-tests
+        test/sema/sema_tests.cpp
+    )
+    target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
+    toyc_enable_warnings(toyc-sema-tests)
+endif()
 
 if(TOYC_ENABLE_COVERAGE)
     find_program(LLVM_COV llvm-cov)
