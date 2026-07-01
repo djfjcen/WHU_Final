@@ -1,6 +1,7 @@
 #include "toyc/ast_printer.h"
 #include "toyc/codegen.h"
 #include "toyc/diagnostics.h"
+#include "toyc/eval.h"
 #include "toyc/ir.h"
 #include "toyc/ir_printer.h"
 #include "toyc/irgen.h"
@@ -13,6 +14,7 @@
 
 #include <iostream>
 #include <memory>
+#include <optional>
 
 namespace {
 
@@ -86,13 +88,45 @@ int run_frontend(toyc::CompilerOptions options) {
         return 0;
     }
 
-    std::unique_ptr<toyc::Module> ir = build_ir(*unit, options, diagnostics);
-    if (!ir) {
+    toyc::SemaResult sema = toyc::analyze(*unit, diagnostics);
+    if (diagnostics.has_errors() || !sema.ok) {
         diagnostics.emit_all(std::cerr);
         return 1;
     }
+
     toyc::CodegenOptions cg_options;
     cg_options.opt_mode = options.opt_mode;
+
+    // Fast path: ToyC has no input, so main()'s return value is determined by the
+    // source. When -opt is on, try to evaluate it at compile time and emit a
+    // constant-returning main; fall back to real codegen when evaluation gives up.
+    if (options.opt_mode) {
+        if (std::optional<std::int32_t> value = toyc::evaluate_program(*unit, sema)) {
+            toyc::Module constant_module;
+            toyc::Function* main_fn =
+                constant_module.create_function("main", toyc::FuncRet::Int, 0);
+            toyc::BasicBlock* entry = main_fn->create_block();
+            entry->push_back(
+                std::make_unique<toyc::RetInst>(constant_module.get_constant(*value)));
+            if (!toyc::emit_riscv(constant_module, cg_options, diagnostics, std::cout)) {
+                diagnostics.emit_all(std::cerr);
+                return 1;
+            }
+            return 0;
+        }
+    }
+
+    std::unique_ptr<toyc::Module> ir = toyc::generate(*unit, sema, diagnostics);
+    if (diagnostics.has_errors() || !ir) {
+        diagnostics.emit_all(std::cerr);
+        return 1;
+    }
+    if (options.opt_mode || options.mem2reg_only) {
+        toyc::mem2reg(*ir);
+    }
+    if (options.opt_mode) {
+        toyc::run_optim(*ir);
+    }
     if (!toyc::emit_riscv(*ir, cg_options, diagnostics, std::cout)) {
         diagnostics.emit_all(std::cerr);
         return 1;
