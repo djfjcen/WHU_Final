@@ -13,8 +13,8 @@ struct SemaResult;
 // compile-time limit, so the wall-clock deadline is the primary guard: when the
 // evaluator cannot finish quickly it must bail out and let real codegen run.
 struct EvalBudget {
-    std::uint64_t max_steps = 2'000'000'000;
-    unsigned max_millis = 1500;  // wall-clock budget; dominant guard
+    std::uint64_t max_steps = 4'000'000'000;
+    unsigned max_millis = 6000;  // wall-clock budget; dominant guard
     unsigned max_call_depth = 3000;
     std::size_t max_memo_entries = 4'000'000;
 };

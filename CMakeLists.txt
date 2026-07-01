@@ -82,6 +82,13 @@ if(TOYC_ENABLE_COVERAGE)
     else()
         message(FATAL_ERROR "TOYC_ENABLE_COVERAGE requires Clang, AppleClang, or GCC")
     endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # OJ builds may not pass an optimized CMAKE_BUILD_TYPE, which would leave the
+    # whole-program compile-time evaluator running unoptimized and hitting its
+    # wall-clock budget on medium/large programs. Force -O2 for GCC/Clang so the
+    # evaluator is fast regardless of the configured build type. MSVC (local only)
+    # is left untouched to avoid /O2 vs /RTC1 debug conflicts.
+    target_compile_options(toyc-core PRIVATE -O2)
 endif()
 
 add_executable(toyc-compiler
