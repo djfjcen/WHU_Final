@@ -49,6 +49,7 @@ add_library(toyc-core
     src/sema/sema.cpp
     src/sema/const_eval.cpp
     src/sema/symbol_table.cpp
+    src/eval/eval.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
@@ -113,11 +114,17 @@ if(TOYC_BUILD_TESTS)
     target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
     toyc_enable_warnings(toyc-codegen-tests)
 
-    add_executable(toyc-sema-tests
-        test/sema/sema_tests.cpp
-    )
-    target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
-    toyc_enable_warnings(toyc-sema-tests)
+add_executable(toyc-sema-tests
+    test/sema/sema_tests.cpp
+)
+target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-sema-tests)
+
+add_executable(toyc-eval-tests
+    test/eval/eval_tests.cpp
+)
+target_link_libraries(toyc-eval-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-eval-tests)
 endif()
 
 if(TOYC_ENABLE_COVERAGE)
