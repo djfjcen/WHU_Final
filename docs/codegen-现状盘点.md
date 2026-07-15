@@ -23,12 +23,12 @@ Parser -> AST validation -> Sema -> IRGen
 | Mem2Reg | 已实现 | 生成 SSA 值与 Phi |
 | Optim | 已实现基础 pass | 常量传播、DCE、GVN/CSE、CFG simplify |
 | RV32IM codegen | 已实现 | 函数、调用、全局、栈帧、Phi 边复制和大立即数 |
-| 后端寄存器规划 | 部分实现 | 优化模式下覆盖基本块内短生命周期值 |
+| 后端寄存器规划 | 已实现基础全局分配 | 优化模式下进行跨基本块活跃性和干涉图分配，区分跨调用值并保留 spill 回退 |
 | Oracle | 已有 Docker 脚本 | 执行生成汇编并与宿主参考结果比较 |
 
 ## 当前缺口
 
-- 缺少跨基本块全局寄存器分配、完整 spill 与 coalescing；
+- 已有跨基本块分配和基础 Phi 合并，但 spill 代价、复杂 coalescing 仍可继续改进；
 - 大循环的循环携带值仍会产生较多栈访存；
 - LICM、强度削减、尾调用优化等尚未系统实现；
 - 性能基准需要在统一 RISC-V 环境重新采集；

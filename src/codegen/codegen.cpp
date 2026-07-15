@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace toyc {
@@ -34,9 +35,21 @@ bool is_result_slot_inst(const Instruction &inst) {
   return inst.has_result() && inst.opcode() != Opcode::Alloca;
 }
 
+bool is_direct_branch_condition_value(const Instruction &inst) {
+  return inst.parent() && inst.uses().size() == 1 &&
+         dynamic_cast<const Instruction *>(inst.uses().front()) &&
+         static_cast<const Instruction *>(inst.uses().front())->parent() ==
+             inst.parent() &&
+         static_cast<const Instruction *>(inst.uses().front())->opcode() ==
+             Opcode::CondBr;
+}
+
 class FunctionFrame {
 public:
-  explicit FunctionFrame(const Function &function) {
+  using RegisterAssignments = std::unordered_map<const Value *, RvReg>;
+
+  explicit FunctionFrame(const Function &function,
+                         const RegisterAssignments *allocations = nullptr) {
     for (const std::unique_ptr<Value> &param : function.params()) {
       if (param->id() >= 8) {
         next_offset_ += 4;
@@ -45,9 +58,19 @@ public:
     outgoing_arg_size_ = next_offset_;
     for (const std::unique_ptr<BasicBlock> &block : function.blocks()) {
       int block_phi_count = 0;
+      bool phi_temps_needed = false;
+      std::unordered_set<RvReg> phi_destinations;
       for (const std::unique_ptr<Instruction> &inst : block->insts()) {
         if (inst->opcode() == Opcode::Phi) {
           ++block_phi_count;
+          if (allocations) {
+            auto destination = allocations->find(inst.get());
+            if (destination == allocations->end()) {
+              phi_temps_needed = true;
+            } else {
+              phi_destinations.insert(destination->second);
+            }
+          }
         }
         if (inst->opcode() == Opcode::Call) {
           has_call_ = true;
@@ -59,7 +82,28 @@ public:
           }
         }
       }
-      max_phi_count_ = std::max(max_phi_count_, block_phi_count);
+      if (allocations && !phi_temps_needed) {
+        for (const std::unique_ptr<Instruction> &inst : block->insts()) {
+          if (inst->opcode() != Opcode::Phi) {
+            break;
+          }
+          const RvReg destination = allocations->at(inst.get());
+          for (Value *incoming : inst->operands()) {
+            auto source = allocations->find(incoming);
+            if (source != allocations->end() && source->second != destination &&
+                phi_destinations.count(source->second)) {
+              phi_temps_needed = true;
+              break;
+            }
+          }
+          if (phi_temps_needed) {
+            break;
+          }
+        }
+      }
+      if (!allocations || phi_temps_needed) {
+        max_phi_count_ = std::max(max_phi_count_, block_phi_count);
+      }
     }
     next_offset_ = outgoing_arg_size_;
     if (has_call_) {
@@ -78,7 +122,11 @@ public:
     }
     for (const std::unique_ptr<BasicBlock> &block : function.blocks()) {
       for (const std::unique_ptr<Instruction> &inst : block->insts()) {
-        if (inst->opcode() == Opcode::Alloca || is_result_slot_inst(*inst)) {
+        const bool allocated = allocations && allocations->count(inst.get());
+        const bool direct_condition =
+            allocations && is_direct_branch_condition_value(*inst);
+        if (inst->opcode() == Opcode::Alloca ||
+            (is_result_slot_inst(*inst) && !allocated && !direct_condition)) {
           slots_.emplace(inst.get(), next_offset_);
           next_offset_ += 4;
         }
@@ -99,6 +147,19 @@ public:
   int register_param_offset(unsigned id) const { return param_offsets_[id]; }
   int phi_temp_offset(unsigned index) const { return phi_temp_offsets_[index]; }
 
+  void reserve_callee_saved(const std::vector<RvReg> &regs) {
+    for (RvReg reg : regs) {
+      callee_saved_offsets_.emplace(reg, next_offset_);
+      next_offset_ += 4;
+    }
+    frame_size_ = align_to(next_offset_, 16);
+  }
+
+  int callee_saved_offset(RvReg reg) const {
+    auto found = callee_saved_offsets_.find(reg);
+    return found == callee_saved_offsets_.end() ? -1 : found->second;
+  }
+
   bool has_slot(const Value *value) const {
     return slots_.find(value) != slots_.end();
   }
@@ -110,6 +171,7 @@ public:
 
 private:
   std::unordered_map<const Value *, int> slots_;
+  std::unordered_map<RvReg, int> callee_saved_offsets_;
   std::vector<int> phi_temp_offsets_;
   std::vector<int> param_offsets_;
   int next_offset_ = 0;
@@ -127,7 +189,11 @@ public:
       : function_(function), options_(options), diagnostics_(diagnostics),
         writer_(writer), frame_(function) {
     if (options_.opt_mode) {
+      plan_global_registers();
       plan_local_registers();
+      collect_used_callee_saved();
+      frame_ = FunctionFrame(function_, &value_regs_);
+      frame_.reserve_callee_saved(used_callee_saved_);
     }
   }
 
@@ -210,8 +276,9 @@ private:
     if (!load_address(inst.operand(0), RvReg::T0)) {
       return false;
     }
-    writer_.inst("lw", reg_name(RvReg::T1), offset_addr(0, RvReg::T0));
-    return spill_result(inst, RvReg::T1);
+    const RvReg destination = result_register(inst, RvReg::T1);
+    writer_.inst("lw", reg_name(destination), offset_addr(0, RvReg::T0));
+    return spill_result(inst, destination);
   }
 
   bool lower_store(const Instruction &inst) {
@@ -234,45 +301,45 @@ private:
     if (try_lower_immediate_binary(inst)) {
       return true;
     }
-    if (!load_i32(inst.operand(0), RvReg::T0) ||
-        !load_i32(inst.operand(1), RvReg::T1)) {
+    RvReg lhs = RvReg::T0;
+    RvReg rhs = RvReg::T1;
+    if (!select_i32_register(inst.operand(0), RvReg::T0, lhs) ||
+        !select_i32_register(inst.operand(1), RvReg::T1, rhs)) {
       return false;
     }
+    const RvReg destination = result_register(inst, RvReg::T2);
     if (inst.opcode() == Opcode::Add) {
-      writer_.inst("add", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("add", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Sub) {
-      writer_.inst("sub", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("sub", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Mul) {
-      writer_.inst("mul", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("mul", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Sdiv) {
-      writer_.inst("div", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("div", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Srem) {
-      writer_.inst("rem", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("rem", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Shl) {
-      writer_.inst("slli", reg_name(RvReg::T2), reg_name(RvReg::T0),
+      writer_.inst("slli", reg_name(destination), reg_name(lhs),
                    std::to_string(static_cast<const ShlInst &>(inst).amount()));
     } else {
-      writer_.inst("srai", reg_name(RvReg::T2), reg_name(RvReg::T0),
+      writer_.inst("srai", reg_name(destination), reg_name(lhs),
                    std::to_string(static_cast<const ShrInst &>(inst).amount()));
     }
-    return spill_result(inst, RvReg::T2);
+    return spill_result(inst, destination);
   }
 
   bool lower_neg(const Instruction &inst) {
     if (inst.num_operands() != 1) {
       return fail("malformed neg instruction");
     }
-    if (!load_i32(inst.operand(0), RvReg::T0)) {
+    RvReg operand = RvReg::T0;
+    if (!select_i32_register(inst.operand(0), RvReg::T0, operand)) {
       return false;
     }
-    writer_.inst("sub", reg_name(RvReg::T2), reg_name(RvReg::Zero),
-                 reg_name(RvReg::T0));
-    return spill_result(inst, RvReg::T2);
+    const RvReg destination = result_register(inst, RvReg::T2);
+    writer_.inst("sub", reg_name(destination), reg_name(RvReg::Zero),
+                 reg_name(operand));
+    return spill_result(inst, destination);
   }
 
   bool lower_icmp(const Instruction &inst) {
@@ -282,44 +349,41 @@ private:
     if (is_direct_branch_condition(inst)) {
       return true;
     }
-    if (!load_i32(inst.operand(0), RvReg::T0) ||
-        !load_i32(inst.operand(1), RvReg::T1)) {
+    RvReg lhs = RvReg::T0;
+    RvReg rhs = RvReg::T1;
+    if (!select_i32_register(inst.operand(0), RvReg::T0, lhs) ||
+        !select_i32_register(inst.operand(1), RvReg::T1, rhs)) {
       return false;
     }
+    const RvReg destination = result_register(inst, RvReg::T2);
     switch (inst.opcode()) {
     case Opcode::ICmpSlt:
-      writer_.inst("slt", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
+      writer_.inst("slt", reg_name(destination), reg_name(lhs), reg_name(rhs));
       break;
     case Opcode::ICmpSgt:
-      writer_.inst("slt", reg_name(RvReg::T2), reg_name(RvReg::T1),
-                   reg_name(RvReg::T0));
+      writer_.inst("slt", reg_name(destination), reg_name(rhs), reg_name(lhs));
       break;
     case Opcode::ICmpSle:
-      writer_.inst("slt", reg_name(RvReg::T2), reg_name(RvReg::T1),
-                   reg_name(RvReg::T0));
-      writer_.inst("xori", reg_name(RvReg::T2), reg_name(RvReg::T2), "1");
+      writer_.inst("slt", reg_name(destination), reg_name(rhs), reg_name(lhs));
+      writer_.inst("xori", reg_name(destination), reg_name(destination), "1");
       break;
     case Opcode::ICmpSge:
-      writer_.inst("slt", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
-      writer_.inst("xori", reg_name(RvReg::T2), reg_name(RvReg::T2), "1");
+      writer_.inst("slt", reg_name(destination), reg_name(lhs), reg_name(rhs));
+      writer_.inst("xori", reg_name(destination), reg_name(destination), "1");
       break;
     case Opcode::ICmpEq:
-      writer_.inst("xor", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
-      writer_.inst("sltiu", reg_name(RvReg::T2), reg_name(RvReg::T2), "1");
+      writer_.inst("xor", reg_name(destination), reg_name(lhs), reg_name(rhs));
+      writer_.inst("sltiu", reg_name(destination), reg_name(destination), "1");
       break;
     case Opcode::ICmpNe:
-      writer_.inst("xor", reg_name(RvReg::T2), reg_name(RvReg::T0),
-                   reg_name(RvReg::T1));
-      writer_.inst("sltu", reg_name(RvReg::T2), reg_name(RvReg::Zero),
-                   reg_name(RvReg::T2));
+      writer_.inst("xor", reg_name(destination), reg_name(lhs), reg_name(rhs));
+      writer_.inst("sltu", reg_name(destination), reg_name(RvReg::Zero),
+                   reg_name(destination));
       break;
     default:
       return fail("malformed icmp opcode");
     }
-    return spill_result(inst, RvReg::T2);
+    return spill_result(inst, destination);
   }
 
   bool lower_br(const Instruction &inst) {
@@ -353,10 +417,11 @@ private:
                                         true_copy_label)) {
       return true;
     }
-    if (!load_i32(inst.operand(0), RvReg::T0)) {
+    RvReg condition = RvReg::T0;
+    if (!select_i32_register(inst.operand(0), RvReg::T0, condition)) {
       return false;
     }
-    writer_.inst("bne", reg_name(RvReg::T0), reg_name(RvReg::Zero),
+    writer_.inst("bne", reg_name(condition), reg_name(RvReg::Zero),
                  true_copy_label);
     if (!emit_phi_copies(false_target, *inst.parent())) {
       return false;
@@ -383,34 +448,36 @@ private:
     if (!is_icmp_opcode(cmp->opcode()) || !is_direct_branch_condition(*cmp)) {
       return false;
     }
-    if (!load_i32(cmp->operand(0), RvReg::T0) ||
-        !load_i32(cmp->operand(1), RvReg::T1)) {
+    RvReg lhs = RvReg::T0;
+    RvReg rhs = RvReg::T1;
+    if (!select_i32_register(cmp->operand(0), RvReg::T0, lhs) ||
+        !select_i32_register(cmp->operand(1), RvReg::T1, rhs)) {
       return false;
     }
 
     switch (cmp->opcode()) {
     case Opcode::ICmpEq:
-      writer_.inst("beq", reg_name(RvReg::T0), reg_name(RvReg::T1),
+      writer_.inst("beq", reg_name(lhs), reg_name(rhs),
                    true_copy_label);
       break;
     case Opcode::ICmpNe:
-      writer_.inst("bne", reg_name(RvReg::T0), reg_name(RvReg::T1),
+      writer_.inst("bne", reg_name(lhs), reg_name(rhs),
                    true_copy_label);
       break;
     case Opcode::ICmpSlt:
-      writer_.inst("blt", reg_name(RvReg::T0), reg_name(RvReg::T1),
+      writer_.inst("blt", reg_name(lhs), reg_name(rhs),
                    true_copy_label);
       break;
     case Opcode::ICmpSgt:
-      writer_.inst("blt", reg_name(RvReg::T1), reg_name(RvReg::T0),
+      writer_.inst("blt", reg_name(rhs), reg_name(lhs),
                    true_copy_label);
       break;
     case Opcode::ICmpSle:
-      writer_.inst("bge", reg_name(RvReg::T1), reg_name(RvReg::T0),
+      writer_.inst("bge", reg_name(rhs), reg_name(lhs),
                    true_copy_label);
       break;
     case Opcode::ICmpSge:
-      writer_.inst("bge", reg_name(RvReg::T0), reg_name(RvReg::T1),
+      writer_.inst("bge", reg_name(lhs), reg_name(rhs),
                    true_copy_label);
       break;
     default:
@@ -432,6 +499,65 @@ private:
   }
 
   bool emit_phi_copies(const BasicBlock &target, const BasicBlock &predecessor) {
+    struct PhiCopy {
+      const Instruction *phi;
+      Value *incoming;
+      RvReg destination;
+    };
+
+    std::vector<PhiCopy> register_copies;
+    bool all_register_destinations = true;
+    for (const std::unique_ptr<Instruction> &inst : target.insts()) {
+      if (inst->opcode() != Opcode::Phi) {
+        break;
+      }
+      Value *incoming =
+          incoming_for_pred(static_cast<const PhiInst &>(*inst), predecessor);
+      if (!incoming) {
+        return fail("phi missing incoming value for predecessor");
+      }
+      auto destination = value_regs_.find(inst.get());
+      if (destination == value_regs_.end()) {
+        all_register_destinations = false;
+        break;
+      }
+      register_copies.push_back(
+          PhiCopy{inst.get(), incoming, destination->second});
+    }
+
+    // Most loop phis have distinct result and back-edge registers.  Lower
+    // those edges directly and keep the existing two-phase stack copy as the
+    // correctness fallback for register cycles or spilled phi results.
+    if (all_register_destinations && !register_copies.empty()) {
+      std::unordered_set<RvReg> destinations;
+      for (const PhiCopy &copy : register_copies) {
+        destinations.insert(copy.destination);
+      }
+      bool has_cycle_risk = false;
+      for (const PhiCopy &copy : register_copies) {
+        auto source = value_regs_.find(copy.incoming);
+        if (source != value_regs_.end() && source->second != copy.destination &&
+            destinations.count(source->second)) {
+          has_cycle_risk = true;
+          break;
+        }
+      }
+      if (!has_cycle_risk) {
+        for (const PhiCopy &copy : register_copies) {
+          auto source = value_regs_.find(copy.incoming);
+          if (source != value_regs_.end() &&
+              source->second == copy.destination) {
+            continue;
+          }
+          if (!load_i32(copy.incoming, RvReg::T0)) {
+            return false;
+          }
+          emit_reg_copy(copy.destination, RvReg::T0);
+        }
+        return true;
+      }
+    }
+
     unsigned index = 0;
     for (const std::unique_ptr<Instruction> &inst : target.insts()) {
       if (inst->opcode() != Opcode::Phi) {
@@ -457,8 +583,13 @@ private:
       }
       emit_load_from_base(RvReg::T0, RvReg::Sp,
                           frame_.phi_temp_offset(index), RvReg::T0);
-      emit_store_from_base(RvReg::T0, RvReg::Sp,
-                           frame_.slot_offset(inst.get()), RvReg::T2);
+      auto destination = value_regs_.find(inst.get());
+      if (destination != value_regs_.end()) {
+        emit_reg_copy(destination->second, RvReg::T0);
+      } else {
+        emit_store_from_base(RvReg::T0, RvReg::Sp,
+                             frame_.slot_offset(inst.get()), RvReg::T2);
+      }
       ++index;
     }
     return true;
@@ -520,15 +651,35 @@ private:
     if (frame_.saves_ra()) {
       emit_store_from_base(RvReg::Ra, RvReg::Sp, frame_.ra_offset(), RvReg::T0);
     }
-    for (unsigned i = 0; i < function_.params().size() && i < arg_regs_.size(); ++i) {
-      emit_store_from_base(arg_regs_[i], RvReg::Sp,
-                           frame_.register_param_offset(i), RvReg::T0);
+    for (RvReg reg : used_callee_saved_) {
+      emit_store_from_base(reg, RvReg::Sp, frame_.callee_saved_offset(reg),
+                           RvReg::T0);
+    }
+    for (unsigned i = 0; i < function_.params().size(); ++i) {
+      Value *param = function_.param(i);
+      auto allocated = value_regs_.find(param);
+      if (allocated != value_regs_.end()) {
+        if (i < arg_regs_.size()) {
+          emit_reg_copy(allocated->second, arg_regs_[i]);
+        } else {
+          emit_load_from_base(allocated->second, RvReg::Sp,
+                              frame_.stack_param_offset(i), RvReg::T0);
+        }
+      } else if (i < arg_regs_.size()) {
+        emit_store_from_base(arg_regs_[i], RvReg::Sp,
+                             frame_.register_param_offset(i), RvReg::T0);
+      }
     }
   }
 
   void emit_epilogue() {
     if (emitted_exit_) {
       return;
+    }
+    for (auto it = used_callee_saved_.rbegin();
+         it != used_callee_saved_.rend(); ++it) {
+      emit_load_from_base(*it, RvReg::Sp, frame_.callee_saved_offset(*it),
+                          RvReg::T0);
     }
     if (frame_.saves_ra()) {
       emit_load_from_base(RvReg::Ra, RvReg::Sp, frame_.ra_offset(), RvReg::T0);
@@ -554,6 +705,11 @@ private:
       materialize_i32(static_cast<const ConstantInt *>(value)->value(), dst);
       return true;
     }
+    auto allocated = value_regs_.find(value);
+    if (allocated != value_regs_.end()) {
+      emit_reg_copy(dst, allocated->second);
+      return true;
+    }
     if (value->value_kind() == ValueKind::Param) {
       const unsigned id = value->id();
       if (frame_.has_register_param_slot(id)) {
@@ -564,15 +720,28 @@ private:
       return true;
     }
     if (frame_.has_slot(value)) {
-      auto reg = value_regs_.find(value);
-      if (reg != value_regs_.end()) {
-        emit_reg_copy(dst, reg->second);
-        return true;
-      }
       emit_load_from_base(dst, RvReg::Sp, frame_.slot_offset(value), dst);
       return true;
     }
     return fail("codegen cannot materialize value " + value->name());
+  }
+
+  bool select_i32_register(Value *value, RvReg scratch, RvReg &selected) {
+    auto allocated = value_regs_.find(value);
+    if (allocated != value_regs_.end()) {
+      selected = allocated->second;
+      return true;
+    }
+    if (!load_i32(value, scratch)) {
+      return false;
+    }
+    selected = scratch;
+    return true;
+  }
+
+  RvReg result_register(const Instruction &inst, RvReg fallback) const {
+    auto allocated = value_regs_.find(&inst);
+    return allocated == value_regs_.end() ? fallback : allocated->second;
   }
 
   bool store_i32(RvReg src, Value *destination_ptr) {
@@ -599,13 +768,13 @@ private:
   }
 
   bool spill_result(const Instruction &inst, RvReg src) {
-    if (!frame_.has_slot(&inst)) {
-      return fail("codegen has no result slot for " + inst.name());
-    }
     auto reg = value_regs_.find(&inst);
     if (reg != value_regs_.end()) {
       emit_reg_copy(reg->second, src);
       return true;
+    }
+    if (!frame_.has_slot(&inst)) {
+      return fail("codegen has no result slot for " + inst.name());
     }
     emit_store_from_base(src, RvReg::Sp, frame_.slot_offset(&inst), RvReg::T0);
     return true;
@@ -647,17 +816,27 @@ private:
         }
         imm = -imm;
       }
-      if (fits_i12(imm) && load_i32(lhs, RvReg::T0)) {
-        emit_addi(RvReg::T2, RvReg::T0, imm);
-        return spill_result(inst, RvReg::T2);
+      if (fits_i12(imm)) {
+        RvReg source = RvReg::T0;
+        if (!select_i32_register(lhs, RvReg::T0, source)) {
+          return false;
+        }
+        const RvReg destination = result_register(inst, RvReg::T2);
+        emit_addi(destination, source, imm);
+        return spill_result(inst, destination);
       }
       return false;
     }
     if (inst.opcode() == Opcode::Add && lhs->value_kind() == ValueKind::Constant) {
       const int imm = static_cast<const ConstantInt *>(lhs)->value();
-      if (fits_i12(imm) && load_i32(rhs, RvReg::T0)) {
-        emit_addi(RvReg::T2, RvReg::T0, imm);
-        return spill_result(inst, RvReg::T2);
+      if (fits_i12(imm)) {
+        RvReg source = RvReg::T0;
+        if (!select_i32_register(rhs, RvReg::T0, source)) {
+          return false;
+        }
+        const RvReg destination = result_register(inst, RvReg::T2);
+        emit_addi(destination, source, imm);
+        return spill_result(inst, destination);
       }
     }
     return false;
@@ -709,10 +888,7 @@ private:
   }
 
   bool is_direct_branch_condition(const Instruction &inst) const {
-    return inst.parent() && inst.uses().size() == 1 &&
-           dynamic_cast<const Instruction *>(inst.uses().front()) &&
-           static_cast<const Instruction *>(inst.uses().front())->parent() == inst.parent() &&
-           static_cast<const Instruction *>(inst.uses().front())->opcode() == Opcode::CondBr;
+    return is_direct_branch_condition_value(inst);
   }
 
   static bool is_icmp_opcode(Opcode opcode) {
@@ -755,6 +931,263 @@ private:
     }
   }
 
+  using ValueSet = std::unordered_set<const Value *>;
+  using InterferenceGraph =
+      std::unordered_map<const Value *, ValueSet>;
+
+  static std::vector<const BasicBlock *> successors(const BasicBlock &block) {
+    std::vector<const BasicBlock *> result;
+    const Instruction *term = block.terminator();
+    if (!term) {
+      return result;
+    }
+    if (term->opcode() == Opcode::Br) {
+      result.push_back(static_cast<const BasicBlock *>(term->operand(0)));
+    } else if (term->opcode() == Opcode::CondBr) {
+      result.push_back(static_cast<const BasicBlock *>(term->operand(1)));
+      result.push_back(static_cast<const BasicBlock *>(term->operand(2)));
+    }
+    return result;
+  }
+
+  static void add_interference(InterferenceGraph &graph, const Value *a,
+                               const Value *b) {
+    if (a == b) {
+      return;
+    }
+    graph[a].insert(b);
+    graph[b].insert(a);
+  }
+
+  static void add_clique(InterferenceGraph &graph, const ValueSet &values) {
+    for (auto first = values.begin(); first != values.end(); ++first) {
+      auto second = first;
+      ++second;
+      for (; second != values.end(); ++second) {
+        add_interference(graph, *first, *second);
+      }
+    }
+  }
+
+  static bool sets_equal(const ValueSet &lhs, const ValueSet &rhs) {
+    if (lhs.size() != rhs.size()) {
+      return false;
+    }
+    for (const Value *value : lhs) {
+      if (!rhs.count(value)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Value *phi_incoming_for_edge(const PhiInst &phi,
+                               const BasicBlock &predecessor) const {
+    for (unsigned i = 0; i < phi.num_operands(); ++i) {
+      if (phi.incoming_blocks()[i] == &predecessor) {
+        return phi.operand(i);
+      }
+    }
+    return nullptr;
+  }
+
+  void plan_global_registers() {
+    ValueSet candidates;
+    std::vector<const Value *> candidate_order;
+    auto add_candidate = [&](const Value *value) {
+      if (candidates.insert(value).second) {
+        candidate_order.push_back(value);
+      }
+    };
+    for (const std::unique_ptr<Value> &param : function_.params()) {
+      if (!param->uses().empty()) {
+        add_candidate(param.get());
+      }
+    }
+    for (const std::unique_ptr<BasicBlock> &block : function_.blocks()) {
+      for (const std::unique_ptr<Instruction> &inst : block->insts()) {
+        if (inst->has_result() && inst->opcode() != Opcode::Alloca &&
+            inst->type() == Type::I32 && !inst->uses().empty()) {
+          if (is_direct_branch_condition(*inst)) {
+            continue;
+          }
+          add_candidate(inst.get());
+        }
+      }
+    }
+    if (candidates.empty()) {
+      return;
+    }
+
+    std::unordered_map<const BasicBlock *, ValueSet> block_use;
+    std::unordered_map<const BasicBlock *, ValueSet> block_def;
+    std::unordered_map<const BasicBlock *, ValueSet> live_in;
+    std::unordered_map<const BasicBlock *, ValueSet> live_out;
+    for (const std::unique_ptr<BasicBlock> &block_owner : function_.blocks()) {
+      const BasicBlock *block = block_owner.get();
+      ValueSet &uses = block_use[block];
+      ValueSet &defs = block_def[block];
+      for (const std::unique_ptr<Instruction> &inst_owner : block->insts()) {
+        const Instruction *inst = inst_owner.get();
+        if (inst->opcode() != Opcode::Phi) {
+          for (Value *operand : inst->operands()) {
+            if (candidates.count(operand) && !defs.count(operand)) {
+              uses.insert(operand);
+            }
+          }
+        }
+        if (candidates.count(inst)) {
+          defs.insert(inst);
+        }
+      }
+      live_in[block];
+      live_out[block];
+    }
+
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (auto block_it = function_.blocks().rbegin();
+           block_it != function_.blocks().rend(); ++block_it) {
+        const BasicBlock *block = block_it->get();
+        ValueSet new_out;
+        for (const BasicBlock *successor : successors(*block)) {
+          ValueSet edge_live = live_in[successor];
+          for (const std::unique_ptr<Instruction> &inst : successor->insts()) {
+            if (inst->opcode() != Opcode::Phi) {
+              break;
+            }
+            edge_live.erase(inst.get());
+            Value *incoming = phi_incoming_for_edge(
+                static_cast<const PhiInst &>(*inst), *block);
+            if (incoming && candidates.count(incoming)) {
+              edge_live.insert(incoming);
+            }
+          }
+          new_out.insert(edge_live.begin(), edge_live.end());
+        }
+        ValueSet new_in = block_use[block];
+        for (const Value *value : new_out) {
+          if (!block_def[block].count(value)) {
+            new_in.insert(value);
+          }
+        }
+        if (!sets_equal(new_out, live_out[block]) ||
+            !sets_equal(new_in, live_in[block])) {
+          live_out[block] = std::move(new_out);
+          live_in[block] = std::move(new_in);
+          changed = true;
+        }
+      }
+    }
+
+    InterferenceGraph graph;
+    ValueSet crosses_call;
+    for (const Value *candidate : candidates) {
+      graph[candidate];
+    }
+    for (const std::unique_ptr<BasicBlock> &block_owner : function_.blocks()) {
+      const BasicBlock *block = block_owner.get();
+      ValueSet live = live_out[block];
+      add_clique(graph, live);
+      for (auto inst_it = block->insts().rbegin();
+           inst_it != block->insts().rend(); ++inst_it) {
+        const Instruction *inst = inst_it->get();
+        if (candidates.count(inst)) {
+          live.erase(inst);
+          for (const Value *other : live) {
+            add_interference(graph, inst, other);
+          }
+        }
+        if (inst->opcode() == Opcode::Call) {
+          crosses_call.insert(live.begin(), live.end());
+        }
+        if (inst->opcode() != Opcode::Phi) {
+          for (Value *operand : inst->operands()) {
+            if (candidates.count(operand)) {
+              live.insert(operand);
+            }
+          }
+        }
+        add_clique(graph, live);
+      }
+    }
+
+    std::vector<const Value *> order = candidate_order;
+    std::unordered_map<const Value *, std::size_t> stable_index;
+    for (std::size_t i = 0; i < candidate_order.size(); ++i) {
+      stable_index.emplace(candidate_order[i], i);
+    }
+    auto priority = [](const Value *value) {
+      int score = static_cast<int>(value->uses().size()) * 10;
+      if (value->value_kind() == ValueKind::Param) {
+        score += 30;
+      }
+      const Instruction *inst = dynamic_cast<const Instruction *>(value);
+      if (inst && inst->opcode() == Opcode::Phi) {
+        score += 100;
+      }
+      return score;
+    };
+    std::sort(order.begin(), order.end(), [&](const Value *lhs,
+                                               const Value *rhs) {
+      const int lhs_priority = priority(lhs);
+      const int rhs_priority = priority(rhs);
+      if (lhs_priority != rhs_priority) {
+        return lhs_priority > rhs_priority;
+      }
+      if (graph[lhs].size() != graph[rhs].size()) {
+        return graph[lhs].size() > graph[rhs].size();
+      }
+      if (lhs->id() != rhs->id()) {
+        return lhs->id() < rhs->id();
+      }
+      return stable_index[lhs] < stable_index[rhs];
+    });
+
+    const std::vector<RvReg> caller_saved = {
+        RvReg::T3, RvReg::T4, RvReg::T5, RvReg::T6};
+    const std::vector<RvReg> callee_saved = {
+        RvReg::S1, RvReg::S2, RvReg::S3, RvReg::S4, RvReg::S5, RvReg::S6,
+        RvReg::S7, RvReg::S8, RvReg::S9, RvReg::S10, RvReg::S11};
+    for (const Value *value : order) {
+      std::unordered_set<RvReg> unavailable;
+      for (const Value *neighbor : graph[value]) {
+        auto allocated = value_regs_.find(neighbor);
+        if (allocated != value_regs_.end()) {
+          unavailable.insert(allocated->second);
+        }
+      }
+      std::vector<RvReg> registers;
+      if (!crosses_call.count(value)) {
+        registers.insert(registers.end(), caller_saved.begin(),
+                         caller_saved.end());
+      }
+      registers.insert(registers.end(), callee_saved.begin(),
+                       callee_saved.end());
+      for (RvReg reg : registers) {
+        if (!unavailable.count(reg)) {
+          value_regs_.emplace(value, reg);
+          break;
+        }
+      }
+    }
+  }
+
+  void collect_used_callee_saved() {
+    const std::vector<RvReg> registers = {
+        RvReg::S1, RvReg::S2, RvReg::S3, RvReg::S4, RvReg::S5, RvReg::S6,
+        RvReg::S7, RvReg::S8, RvReg::S9, RvReg::S10, RvReg::S11};
+    for (RvReg reg : registers) {
+      for (const auto &allocation : value_regs_) {
+        if (allocation.second == reg) {
+          used_callee_saved_.push_back(reg);
+          break;
+        }
+      }
+    }
+  }
+
   void plan_local_registers() {
     const std::vector<RvReg> temp_regs = {RvReg::T3, RvReg::T4, RvReg::T5,
                                           RvReg::T6};
@@ -777,7 +1210,8 @@ private:
       };
       std::vector<Interval> intervals;
       for (const std::unique_ptr<Instruction> &inst : block->insts()) {
-        if (!is_register_candidate(*inst) || is_direct_branch_condition(*inst)) {
+        if (value_regs_.count(inst.get()) || !is_register_candidate(*inst) ||
+            is_direct_branch_condition(*inst)) {
           continue;
         }
         const int start = index_by_inst[inst.get()];
@@ -842,6 +1276,7 @@ private:
   FunctionFrame frame_;
   bool emitted_exit_ = false;
   std::unordered_map<const Value *, RvReg> value_regs_;
+  std::vector<RvReg> used_callee_saved_;
   const std::vector<RvReg> arg_regs_ = {
       RvReg::A0, RvReg::A1, RvReg::A2, RvReg::A3,
       RvReg::A4, RvReg::A5, RvReg::A6, RvReg::A7,

@@ -487,9 +487,45 @@ TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {
         CodegenPipeline::Optim);
     EXPECT_NE(std::string::npos, leaf.find("f:\n"));
     EXPECT_EQ(std::string::npos, leaf.find("f:\n    sw ra,"));
-    EXPECT_NE(std::string::npos, leaf.find("    addi t2, t0, 1\n"));
-    EXPECT_NE(std::string::npos, leaf.find("    add t3, t2, x0\n"));
+    EXPECT_NE(std::string::npos, leaf.find("    addi t"));
     EXPECT_EQ(std::string::npos, leaf.find("addi t0, t0, 0"));
+}
+
+TEST(Codegen, OptimizedLoopKeepsPhiValuesInRegisters) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int i = 0; int sum = 0; "
+        "while (i < 1000) { sum = sum + i; i = i + 1; } return sum; }\n",
+        CodegenPipeline::Optim);
+
+    const std::size_t body_start = asm_text.find(".Lmain_bb2:\n");
+    ASSERT_NE(std::string::npos, body_start);
+    const std::size_t body_end = asm_text.find("    j .Lmain_bb1\n", body_start);
+    ASSERT_NE(std::string::npos, body_end);
+    const std::string loop_body =
+        asm_text.substr(body_start, body_end - body_start);
+
+    EXPECT_EQ(std::string::npos, loop_body.find("    lw ")) << loop_body;
+    EXPECT_EQ(std::string::npos, loop_body.find("    sw ")) << loop_body;
+    EXPECT_NE(std::string::npos, loop_body.find("    add t")) << loop_body;
+    EXPECT_NE(std::string::npos, loop_body.find("    addi t")) << loop_body;
+}
+
+TEST(Codegen, GlobalRegisterAllocationPreservesCalleeSavedRegisters) {
+    const std::string asm_text = compile_source_to_asm(
+        "int inc(int x) { return x + 1; } "
+        "int f(int x) { int before = x + 2; int after = inc(x); "
+        "return before + after; } int main() { return f(10); }\n",
+        CodegenPipeline::Optim);
+
+    const std::size_t f_start = asm_text.find("f:\n");
+    const std::size_t main_start = asm_text.find("main:\n", f_start);
+    ASSERT_NE(std::string::npos, f_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string f_assembly =
+        asm_text.substr(f_start, main_start - f_start);
+    EXPECT_NE(std::string::npos, f_assembly.find("    call inc\n"));
+    EXPECT_NE(std::string::npos, f_assembly.find("    sw s"));
+    EXPECT_NE(std::string::npos, f_assembly.find("    lw s"));
 }
 
 TEST(Codegen, P7RemovesFallthroughJumpAfterDirectBranch) {
