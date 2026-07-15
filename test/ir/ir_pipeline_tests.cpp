@@ -105,8 +105,89 @@ entry:
 }
 define i32 @main() {
 entry:
-  %v.13 = call @f, 1, 2
-  ret %v.13
+  ret 6
+}
+)";
+    EXPECT_EQ(expected, compile_ir(src, IrLevel::Optim));
+}
+
+TEST(Optim_Pipeline, KeepsCallWithDynamicArgument) {
+    const char* src = R"(int add_one(int x) {
+  return x + 1;
+}
+
+int forward(int x) {
+  return add_one(x);
+}
+
+int main() {
+  return forward(2);
+}
+)";
+    const char* expected = R"(define i32 @add_one(i32 %arg.0) {
+entry:
+  %v.2 = add %arg.0, 1
+  ret %v.2
+}
+define i32 @forward(i32 %arg.0) {
+entry:
+  %v.5 = call @add_one, %arg.0
+  ret %v.5
+}
+define i32 @main() {
+entry:
+  ret 3
+}
+)";
+    EXPECT_EQ(expected, compile_ir(src, IrLevel::Optim));
+}
+
+TEST(Optim_Pipeline, KeepsCallWhenEvaluationFails) {
+    const char* src = R"(int divide(int x, int y) {
+  return x / y;
+}
+
+int main() {
+  return divide(5, 0);
+}
+)";
+    const char* expected = R"(define i32 @divide(i32 %arg.0, i32 %arg.1) {
+entry:
+  %v.4 = sdiv %arg.0, %arg.1
+  ret %v.4
+}
+define i32 @main() {
+entry:
+  %v.5 = call @divide, 5, 0
+  ret %v.5
+}
+)";
+    EXPECT_EQ(expected, compile_ir(src, IrLevel::Optim));
+}
+
+TEST(Optim_Pipeline, KeepsCallToStatefulFunction) {
+    const char* src = R"(int state = 0;
+
+int set_state(int x) {
+  state = x;
+  return x;
+}
+
+int main() {
+  return set_state(3);
+}
+)";
+    const char* expected = R"(@state = global i32 0
+
+define i32 @set_state(i32 %arg.0) {
+entry:
+  store @state, %arg.0
+  ret %arg.0
+}
+define i32 @main() {
+entry:
+  %v.3 = call @set_state, 3
+  ret %v.3
 }
 )";
     EXPECT_EQ(expected, compile_ir(src, IrLevel::Optim));

@@ -167,4 +167,13 @@ Value* Module::create_register(Type type) {
     return raw;
 }
 
+const Function* Module::find_function(const std::string& name) const {
+    for (const std::unique_ptr<Function>& function : functions_) {
+        if (function->short_name() == name) {
+            return function.get();
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace toyc

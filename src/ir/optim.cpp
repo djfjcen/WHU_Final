@@ -1,5 +1,6 @@
 #include "toyc/optim.h"
 
+#include "toyc/const_eval.h"
 #include "toyc/ir.h"
 #include "toyc/mem2reg.h"
 
@@ -272,8 +273,9 @@ bool cfs_merge_blocks(Function& fn) {
 
 }  // namespace
 
-// Filled in by Tasks 2-5; wired by Task 6.
 bool constprop(Function& fn) {
+    ConstChecker checker(*fn.module());
+    ConstEvaluator evaluator(*fn.module(), checker);
     bool changed = false;
     bool local_changed = true;
     while (local_changed) {
@@ -303,7 +305,29 @@ bool constprop(Function& fn) {
                     if (o->value_kind() == ValueKind::Constant) {
                         folded = fn.module()->get_constant(-static_cast<ConstantInt*>(o)->value());
                     }
-                } else if (op != Opcode::Call && inst->num_operands() == 2) {
+                } else if (op == Opcode::Call) {
+                    std::vector<int> arguments;
+                    arguments.reserve(inst->num_operands());
+                    bool all_constant = true;
+                    for (Value* operand : inst->operands()) {
+                        if (operand->value_kind() != ValueKind::Constant) {
+                            all_constant = false;
+                            break;
+                        }
+                        arguments.push_back(static_cast<ConstantInt*>(operand)->value());
+                    }
+                    if (all_constant) {
+                        const auto& call = static_cast<const CallInst&>(*inst);
+                        const Function* callee =
+                            fn.module()->find_function(call.callee_name());
+                        if (callee && checker.is_const_callable(*callee)) {
+                            ConstEvalResult result = evaluator.evaluate(*callee, arguments);
+                            if (result) {
+                                folded = fn.module()->get_constant(*result.value);
+                            }
+                        }
+                    }
+                } else if (inst->num_operands() == 2) {
                     Value* a = inst->operand(0);
                     Value* b = inst->operand(1);
                     if (a->value_kind() == ValueKind::Constant &&

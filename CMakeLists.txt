@@ -53,6 +53,7 @@ add_library(toyc-core
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
     src/ir/irgen.cpp
+    src/ir/const_eval.cpp
     src/ir/mem2reg.cpp
     src/ir/optim.cpp
     src/codegen/asm_writer.cpp
@@ -100,6 +101,7 @@ if(TOYC_BUILD_TESTS)
 
     add_executable(toyc-ir-tests
         test/support/ir_fixture.cpp
+        test/ir/const_eval_tests.cpp
         test/ir/ir_tests.cpp
         test/ir/ir_pipeline_tests.cpp
     )
