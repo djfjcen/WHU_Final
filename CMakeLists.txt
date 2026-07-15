@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-# Default to an optimized build when the caller (e.g. the judge) does not pick a
-# type. The compile-time whole-program evaluator is interpretive, so an -O0 build
-# would be far slower and could hit the judge's compile-time limit.
+# Use a conventional optimized default for single-config generators. Explicit
+# Debug/Release selections made by developers or the judge remain authoritative.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
@@ -47,6 +46,7 @@ endfunction()
 add_library(toyc-core
     src/driver/options.cpp
     src/driver/diagnostics.cpp
+    src/driver/compiler.cpp
     src/frontend/token.cpp
     src/frontend/lexer.cpp
     src/frontend/parser.cpp
@@ -57,7 +57,6 @@ add_library(toyc-core
     src/sema/sema.cpp
     src/sema/const_eval.cpp
     src/sema/symbol_table.cpp
-    src/eval/eval.cpp
     src/ir/ir.cpp
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
@@ -82,13 +81,6 @@ if(TOYC_ENABLE_COVERAGE)
     else()
         message(FATAL_ERROR "TOYC_ENABLE_COVERAGE requires Clang, AppleClang, or GCC")
     endif()
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # OJ builds may not pass an optimized CMAKE_BUILD_TYPE, which would leave the
-    # whole-program compile-time evaluator running unoptimized and hitting its
-    # wall-clock budget on medium/large programs. Force -O2 for GCC/Clang so the
-    # evaluator is fast regardless of the configured build type. MSVC (local only)
-    # is left untouched to avoid /O2 vs /RTC1 debug conflicts.
-    target_compile_options(toyc-core PRIVATE -O2)
 endif()
 
 add_executable(toyc-compiler
@@ -135,11 +127,6 @@ add_executable(toyc-sema-tests
 target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
 toyc_enable_warnings(toyc-sema-tests)
 
-add_executable(toyc-eval-tests
-    test/eval/eval_tests.cpp
-)
-target_link_libraries(toyc-eval-tests PRIVATE toyc-core GTest::gtest_main)
-toyc_enable_warnings(toyc-eval-tests)
 endif()
 
 if(TOYC_ENABLE_COVERAGE)

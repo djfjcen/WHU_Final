@@ -1,18 +1,21 @@
 #include "toyc/codegen.h"
 
 #include "toyc/ast.h"
+#include "toyc/compiler.h"
 #include "toyc/diagnostics.h"
 #include "toyc/ir.h"
 #include "toyc/irgen.h"
 #include "toyc/lexer.h"
 #include "toyc/mem2reg.h"
 #include "toyc/optim.h"
+#include "toyc/options.h"
 #include "toyc/parser.h"
 #include "toyc/riscv.h"
 #include "toyc/sema.h"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -28,6 +31,22 @@ enum class CodegenPipeline {
     Mem2Reg,
     Optim,
 };
+
+struct DriverResult {
+    int status = 1;
+    std::string assembly;
+    std::string diagnostics;
+};
+
+DriverResult compile_with_driver(const std::string& source, bool optimize) {
+    CompilerOptions options;
+    options.opt_mode = optimize;
+    std::istringstream input(source);
+    std::ostringstream output;
+    std::ostringstream errors;
+    const int status = run_compiler(options, input, output, errors);
+    return DriverResult{status, output.str(), errors.str()};
+}
 
 Module make_return_const_module(int value) {
     Module module;
@@ -415,6 +434,48 @@ TEST(Codegen, CompilesOptimizedMergedPhiPredecessor) {
     EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
 }
 
+TEST(DriverPipeline, OptimizedCompilationPreservesProgramStructure) {
+    const DriverResult result = compile_with_driver(
+        "int g = 1; "
+        "int step(int n) { if (n <= 0) { return g; } "
+        "g = g + n; return step(n - 1); } "
+        "int main() { int i = 0; while (i < 3) { i = i + 1; } "
+        "return step(i); }\n",
+        true);
+
+    ASSERT_EQ(0, result.status) << result.diagnostics;
+    EXPECT_NE(std::string::npos, result.assembly.find("g:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("step:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("main:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("call step\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("%hi(g)"));
+    EXPECT_NE(std::string::npos, result.assembly.find(".Lmain_bb"));
+}
+
+TEST(DriverPipeline, LargeRuntimeLoopIsNotExecutedDuringCompilation) {
+    const auto started = std::chrono::steady_clock::now();
+    const DriverResult result = compile_with_driver(
+        "int main() { int i = 0; int sum = 0; "
+        "while (i < 1000000000) { sum = sum + i; i = i + 1; } "
+        "return sum; }\n",
+        true);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_EQ(0, result.status) << result.diagnostics;
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    EXPECT_NE(std::string::npos, result.assembly.find("main:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find(".Lmain_bb"));
+}
+
+TEST(DriverPipeline, SemanticErrorsStillFailBeforeCodegen) {
+    const DriverResult result =
+        compile_with_driver("int main() { return missing; }\n", true);
+
+    EXPECT_NE(0, result.status);
+    EXPECT_TRUE(result.assembly.empty());
+    EXPECT_NE(std::string::npos, result.diagnostics.find("sema"));
+}
+
 TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {
     const std::string const_main = compile_source_to_asm(
         "int main() { return 15; }\n", CodegenPipeline::Optim);
@@ -453,18 +514,24 @@ TEST(Codegen, CompilesEndToEndCases) {
         "many_args.tc",
     };
 
-    for (const std::string& name : cases) {
-        const std::filesystem::path path = std::filesystem::path("test/codegen/cases") / name;
-        SCOPED_TRACE(path.string());
-        std::ifstream input(path);
-        ASSERT_TRUE(input.good());
-        std::ostringstream source;
-        source << input.rdbuf();
-        const std::string asm_text = compile_source_to_asm(source.str());
-        EXPECT_NE(std::string::npos, asm_text.find("    .section .text\n"));
-        EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
-        EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
-        EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+    for (CodegenPipeline pipeline : {CodegenPipeline::Raw, CodegenPipeline::Optim}) {
+        for (const std::string& name : cases) {
+            const std::filesystem::path path =
+                std::filesystem::path("test/codegen/cases") / name;
+            SCOPED_TRACE(path.string());
+            SCOPED_TRACE(pipeline == CodegenPipeline::Raw ? "raw" : "optim");
+            std::ifstream input(path);
+            ASSERT_TRUE(input.good());
+            std::ostringstream source;
+            source << input.rdbuf();
+            const std::string asm_text =
+                compile_source_to_asm(source.str(), pipeline);
+            EXPECT_NE(std::string::npos,
+                      asm_text.find("    .section .text\n"));
+            EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
+            EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+            EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+        }
     }
 }
 
