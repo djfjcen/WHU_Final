@@ -1,4 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Use a conventional optimized default for single-config generators. Explicit
+# Debug/Release selections made by developers or the judge remain authoritative.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 project(toyc-compiler LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -39,6 +46,7 @@ endfunction()
 add_library(toyc-core
     src/driver/options.cpp
     src/driver/diagnostics.cpp
+    src/driver/compiler.cpp
     src/frontend/token.cpp
     src/frontend/lexer.cpp
     src/frontend/parser.cpp
@@ -115,11 +123,12 @@ if(TOYC_BUILD_TESTS)
     target_link_libraries(toyc-codegen-tests PRIVATE toyc-core GTest::gtest_main)
     toyc_enable_warnings(toyc-codegen-tests)
 
-    add_executable(toyc-sema-tests
-        test/sema/sema_tests.cpp
-    )
-    target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
-    toyc_enable_warnings(toyc-sema-tests)
+add_executable(toyc-sema-tests
+    test/sema/sema_tests.cpp
+)
+target_link_libraries(toyc-sema-tests PRIVATE toyc-core GTest::gtest_main)
+toyc_enable_warnings(toyc-sema-tests)
+
 endif()
 
 if(TOYC_ENABLE_COVERAGE)

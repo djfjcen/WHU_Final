@@ -14,7 +14,7 @@ void print_usage(std::ostream& output) {
            << "  -dump-ast            dump AST to stderr\n"
            << "  -dump-ir             dump IR to stderr\n"
            << "  -dump-asm            alias of -dump-ir\n"
-           << "  -opt                 enable optimizations (reserved)\n"
+           << "  -opt                 enable IR and backend optimizations\n"
            << "  -mem2reg-only        run mem2reg only (test isolation)\n";
 }
 

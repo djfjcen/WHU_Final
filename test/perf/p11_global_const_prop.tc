@@ -1,0 +1,3 @@
+const int scale = 16; int total = 0;
+int tick(int x) { return x + 1; }
+int main() { int i = 0; while (i < 12000) { total = total + i * scale + tick(i); i = i + 1; } return total; }

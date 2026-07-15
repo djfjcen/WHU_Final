@@ -1,18 +1,21 @@
 #include "toyc/codegen.h"
 
 #include "toyc/ast.h"
+#include "toyc/compiler.h"
 #include "toyc/diagnostics.h"
 #include "toyc/ir.h"
 #include "toyc/irgen.h"
 #include "toyc/lexer.h"
 #include "toyc/mem2reg.h"
 #include "toyc/optim.h"
+#include "toyc/options.h"
 #include "toyc/parser.h"
 #include "toyc/riscv.h"
 #include "toyc/sema.h"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -28,6 +31,22 @@ enum class CodegenPipeline {
     Mem2Reg,
     Optim,
 };
+
+struct DriverResult {
+    int status = 1;
+    std::string assembly;
+    std::string diagnostics;
+};
+
+DriverResult compile_with_driver(const std::string& source, bool optimize) {
+    CompilerOptions options;
+    options.opt_mode = optimize;
+    std::istringstream input(source);
+    std::ostringstream output;
+    std::ostringstream errors;
+    const int status = run_compiler(options, input, output, errors);
+    return DriverResult{status, output.str(), errors.str()};
+}
 
 Module make_return_const_module(int value) {
     Module module;
@@ -74,6 +93,9 @@ std::string compile_source_to_asm(const std::string& source,
         return {};
     }
 
+    if (pipeline == CodegenPipeline::Optim) {
+        interprocedural_global_opt(*module);
+    }
     if (pipeline == CodegenPipeline::Mem2Reg || pipeline == CodegenPipeline::Optim) {
         mem2reg(*module);
     }
@@ -415,6 +437,48 @@ TEST(Codegen, CompilesOptimizedMergedPhiPredecessor) {
     EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
 }
 
+TEST(DriverPipeline, OptimizedCompilationPreservesProgramStructure) {
+    const DriverResult result = compile_with_driver(
+        "int g = 1; "
+        "int step(int n) { if (n <= 0) { return g; } "
+        "g = g + n; return step(n - 1); } "
+        "int main() { int i = 0; while (i < 3) { i = i + 1; } "
+        "return step(i); }\n",
+        true);
+
+    ASSERT_EQ(0, result.status) << result.diagnostics;
+    EXPECT_NE(std::string::npos, result.assembly.find("g:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("step:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("main:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("call step\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find("%hi(g)"));
+    EXPECT_NE(std::string::npos, result.assembly.find(".Lmain_bb"));
+}
+
+TEST(DriverPipeline, LargeRuntimeLoopIsNotExecutedDuringCompilation) {
+    const auto started = std::chrono::steady_clock::now();
+    const DriverResult result = compile_with_driver(
+        "int main() { int i = 0; int sum = 0; "
+        "while (i < 1000000000) { sum = sum + i; i = i + 1; } "
+        "return sum; }\n",
+        true);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_EQ(0, result.status) << result.diagnostics;
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
+    EXPECT_NE(std::string::npos, result.assembly.find("main:\n"));
+    EXPECT_NE(std::string::npos, result.assembly.find(".Lmain_bb"));
+}
+
+TEST(DriverPipeline, SemanticErrorsStillFailBeforeCodegen) {
+    const DriverResult result =
+        compile_with_driver("int main() { return missing; }\n", true);
+
+    EXPECT_NE(0, result.status);
+    EXPECT_TRUE(result.assembly.empty());
+    EXPECT_NE(std::string::npos, result.diagnostics.find("sema"));
+}
+
 TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {
     const std::string const_main = compile_source_to_asm(
         "int main() { return 15; }\n", CodegenPipeline::Optim);
@@ -426,9 +490,187 @@ TEST(Codegen, P7OptimizesFrameBranchesAndImmediates) {
         CodegenPipeline::Optim);
     EXPECT_NE(std::string::npos, leaf.find("f:\n"));
     EXPECT_EQ(std::string::npos, leaf.find("f:\n    sw ra,"));
-    EXPECT_NE(std::string::npos, leaf.find("    addi t2, t0, 1\n"));
-    EXPECT_NE(std::string::npos, leaf.find("    add t3, t2, x0\n"));
+    EXPECT_NE(std::string::npos, leaf.find("    addi t"));
     EXPECT_EQ(std::string::npos, leaf.find("addi t0, t0, 0"));
+}
+
+TEST(Codegen, OptimizedLoopKeepsPhiValuesInRegisters) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int i = 0; int sum = 0; "
+        "while (i < 1000) { sum = sum + i; i = i + 1; } return sum; }\n",
+        CodegenPipeline::Optim);
+
+    const std::size_t body_start = asm_text.find(".Lmain_bb2:\n");
+    ASSERT_NE(std::string::npos, body_start);
+    const std::size_t body_end = asm_text.find(".Lmain_bb1:\n", body_start);
+    ASSERT_NE(std::string::npos, body_end);
+    const std::string loop_body =
+        asm_text.substr(body_start, body_end - body_start);
+
+    EXPECT_EQ(std::string::npos, loop_body.find("    lw ")) << loop_body;
+    EXPECT_EQ(std::string::npos, loop_body.find("    sw ")) << loop_body;
+    EXPECT_EQ(std::string::npos, loop_body.find("    j ")) << loop_body;
+    EXPECT_NE(std::string::npos, loop_body.find("    add t")) << loop_body;
+    EXPECT_NE(std::string::npos, loop_body.find("    addi t")) << loop_body;
+}
+
+TEST(Codegen, GlobalRegisterAllocationPreservesCalleeSavedRegisters) {
+    const std::string asm_text = compile_source_to_asm(
+        "int inc(int x) { if (x < 0) { return 0; } return x + 1; } "
+        "int f(int x) { int before = x + 2; int after = inc(x); "
+        "return before + after; } int main() { return f(10); }\n",
+        CodegenPipeline::Optim);
+
+    const std::size_t f_start = asm_text.find("f:\n");
+    const std::size_t main_start = asm_text.find("main:\n", f_start);
+    ASSERT_NE(std::string::npos, f_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string f_assembly =
+        asm_text.substr(f_start, main_start - f_start);
+    EXPECT_NE(std::string::npos, f_assembly.find("    call inc\n"));
+    EXPECT_NE(std::string::npos, f_assembly.find("    sw s"));
+    EXPECT_NE(std::string::npos, f_assembly.find("    lw s"));
+}
+
+TEST(Codegen, EliminatesSelfTailCallIntoRegisterOnlyLoop) {
+    const std::string asm_text = compile_source_to_asm(
+        "int sum_to(int n, int acc) { if (n <= 0) { return acc; } "
+        "return sum_to(n - 1, acc + n); } "
+        "int main() { return sum_to(10, 0); }\n",
+        CodegenPipeline::Optim);
+
+    const std::size_t function_start = asm_text.find("sum_to:\n");
+    const std::size_t main_start = asm_text.find("main:\n", function_start);
+    ASSERT_NE(std::string::npos, function_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string function_assembly =
+        asm_text.substr(function_start, main_start - function_start);
+    EXPECT_EQ(std::string::npos, function_assembly.find("    call sum_to\n"));
+    EXPECT_EQ(std::string::npos, function_assembly.find("    lw "));
+    EXPECT_EQ(std::string::npos, function_assembly.find("    sw "));
+    EXPECT_NE(std::string::npos, function_assembly.find("    j .Lsum_to_entry\n"));
+    EXPECT_NE(std::string::npos,
+              asm_text.substr(main_start).find("    call sum_to\n"));
+}
+
+TEST(Codegen, HoistsLoopComparisonConstantIntoRegister) {
+    const std::string asm_text = compile_source_to_asm(
+        "int main() { int i = 0; while (i < 1000) { i = i + 1; } return i; }\n",
+        CodegenPipeline::Optim);
+    const std::size_t loop = asm_text.find(".Lmain_bb1:\n");
+    ASSERT_NE(std::string::npos, loop);
+    const std::string prefix = asm_text.substr(0, loop);
+    const std::string loop_and_after = asm_text.substr(loop);
+    EXPECT_NE(std::string::npos, prefix.find("1000"));
+    EXPECT_EQ(std::string::npos, loop_and_after.find("addi t1, x0, 1000"));
+}
+
+TEST(Codegen, LocalizesGlobalMutationOutsideHotLoop) {
+    const std::string asm_text = compile_source_to_asm(
+        "int g = 0; int main() { int i = 0; while (i < 1000) { "
+        "g = g + i; i = i + 1; } return g; }\n",
+        CodegenPipeline::Optim);
+    const std::size_t loop_start = asm_text.find(".Lmain_bb2:\n");
+    const std::size_t loop_end = asm_text.find(".Lmain_bb3:\n", loop_start);
+    ASSERT_NE(std::string::npos, loop_start);
+    ASSERT_NE(std::string::npos, loop_end);
+    const std::string hot_loop =
+        asm_text.substr(loop_start, loop_end - loop_start);
+    EXPECT_EQ(std::string::npos, hot_loop.find("%hi(g)")) << hot_loop;
+    EXPECT_EQ(std::string::npos, hot_loop.find("    lw ")) << hot_loop;
+    EXPECT_EQ(std::string::npos, hot_loop.find("    sw ")) << hot_loop;
+}
+
+TEST(Codegen, HoistsLoopInvariantStrengthReducedExpression) {
+    const std::string asm_text = compile_source_to_asm(
+        "int f(int n, int x) { int i = 0; int sum = 0; "
+        "while (i < n) { sum = sum + x * 8; i = i + 1; } return sum; } "
+        "int main() { return f(20, 3); }\n",
+        CodegenPipeline::Optim);
+    const std::size_t f_start = asm_text.find("f:\n");
+    const std::size_t loop_start = asm_text.find(".Lf_bb1:\n", f_start);
+    ASSERT_NE(std::string::npos, f_start);
+    ASSERT_NE(std::string::npos, loop_start);
+    const std::string prefix = asm_text.substr(f_start, loop_start - f_start);
+    const std::string loop = asm_text.substr(loop_start);
+    EXPECT_NE(std::string::npos, prefix.find("    slli ")) << prefix;
+    EXPECT_EQ(std::string::npos, loop.find("    mul ")) << loop;
+}
+
+TEST(Codegen, LowersSignedPowerOfTwoDivisionAndRemainderWithoutDivRem) {
+    const std::string asm_text = compile_source_to_asm(
+        "int f(int x) { return x / 8 + x % 8; } "
+        "int main() { return f(-123); }\n",
+        CodegenPipeline::Optim);
+    EXPECT_EQ(std::string::npos, asm_text.find("    div ")) << asm_text;
+    EXPECT_EQ(std::string::npos, asm_text.find("    rem ")) << asm_text;
+    EXPECT_NE(std::string::npos, asm_text.find("    srli ")) << asm_text;
+    EXPECT_NE(std::string::npos, asm_text.find("    srai ")) << asm_text;
+}
+
+TEST(Codegen, LocalizesGlobalAcrossCallThatDoesNotTouchIt) {
+    const std::string asm_text = compile_source_to_asm(
+        "int g = 0; int inc(int x) { if (x < 0) { return 0; } return x + 1; } "
+        "int main() { int i = 0; while (i < 100) { "
+        "g = g + inc(i); i = i + 1; } return g; }\n",
+        CodegenPipeline::Optim);
+    const std::size_t loop_start = asm_text.find(".Lmain_bb2:\n");
+    const std::size_t loop_end = asm_text.find(".Lmain_bb3:\n", loop_start);
+    ASSERT_NE(std::string::npos, loop_start);
+    ASSERT_NE(std::string::npos, loop_end);
+    const std::string hot_loop =
+        asm_text.substr(loop_start, loop_end - loop_start);
+    EXPECT_NE(std::string::npos, hot_loop.find("    call inc\n"));
+    EXPECT_EQ(std::string::npos, hot_loop.find("%hi(g)")) << hot_loop;
+}
+
+TEST(Codegen, LeafRegisterAllocationUsesArgumentRegisterPool) {
+    const std::string asm_text = compile_source_to_asm(
+        "int f(int x) { int a = x + 1; int b = x + 2; int c = x + 3; "
+        "int d = x + 4; int e = x + 5; int q = a*b + c*d; "
+        "return q + e + a + b + c + d; } int main() { return f(7); }\n",
+        CodegenPipeline::Optim);
+    const std::size_t f_start = asm_text.find("f:\n");
+    const std::size_t main_start = asm_text.find("main:\n", f_start);
+    ASSERT_NE(std::string::npos, f_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string function = asm_text.substr(f_start, main_start - f_start);
+    EXPECT_TRUE(function.find(" a1,") != std::string::npos ||
+                function.find(" a2,") != std::string::npos ||
+                function.find(" a3,") != std::string::npos) << function;
+}
+
+TEST(Codegen, CallArgumentParallelCopyBreaksRegisterCycles) {
+    const std::string asm_text = compile_source_to_asm(
+        "int sub(int a, int b) { if (a == b) { return 0; } return a - b; } "
+        "int swap(int x, int y) { return sub(y, x); } "
+        "int main() { return swap(7, 19); }\n",
+        CodegenPipeline::Optim);
+    const std::size_t swap_start = asm_text.find("swap:\n");
+    const std::size_t main_start = asm_text.find("main:\n", swap_start);
+    ASSERT_NE(std::string::npos, swap_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string function =
+        asm_text.substr(swap_start, main_start - swap_start);
+    EXPECT_NE(std::string::npos, function.find("    call sub\n"));
+    EXPECT_NE(std::string::npos, function.find(" t2,")) << function;
+}
+
+TEST(Codegen, InlinesSmallPureSingleBlockLeafWithoutRemovingDefinition) {
+    const std::string asm_text = compile_source_to_asm(
+        "int inc(int x) { return x + 1; } "
+        "int twice(int x) { return inc(x) + inc(x); } "
+        "int main() { return twice(20); }\n",
+        CodegenPipeline::Optim);
+    const std::size_t twice_start = asm_text.find("twice:\n");
+    const std::size_t main_start = asm_text.find("main:\n", twice_start);
+    ASSERT_NE(std::string::npos, asm_text.find("inc:\n"));
+    ASSERT_NE(std::string::npos, twice_start);
+    ASSERT_NE(std::string::npos, main_start);
+    const std::string twice =
+        asm_text.substr(twice_start, main_start - twice_start);
+    EXPECT_EQ(std::string::npos, twice.find("    call inc\n")) << twice;
+    EXPECT_NE(std::string::npos, twice.find("    addi ")) << twice;
 }
 
 TEST(Codegen, P7RemovesFallthroughJumpAfterDirectBranch) {
@@ -449,22 +691,29 @@ TEST(Codegen, CompilesEndToEndCases) {
         "break_continue.tc",
         "global_mutation.tc",
         "call_recursive.tc",
+        "tail_recursive.tc",
         "void_call.tc",
         "many_args.tc",
     };
 
-    for (const std::string& name : cases) {
-        const std::filesystem::path path = std::filesystem::path("test/codegen/cases") / name;
-        SCOPED_TRACE(path.string());
-        std::ifstream input(path);
-        ASSERT_TRUE(input.good());
-        std::ostringstream source;
-        source << input.rdbuf();
-        const std::string asm_text = compile_source_to_asm(source.str());
-        EXPECT_NE(std::string::npos, asm_text.find("    .section .text\n"));
-        EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
-        EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
-        EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+    for (CodegenPipeline pipeline : {CodegenPipeline::Raw, CodegenPipeline::Optim}) {
+        for (const std::string& name : cases) {
+            const std::filesystem::path path =
+                std::filesystem::path("test/codegen/cases") / name;
+            SCOPED_TRACE(path.string());
+            SCOPED_TRACE(pipeline == CodegenPipeline::Raw ? "raw" : "optim");
+            std::ifstream input(path);
+            ASSERT_TRUE(input.good());
+            std::ostringstream source;
+            source << input.rdbuf();
+            const std::string asm_text =
+                compile_source_to_asm(source.str(), pipeline);
+            EXPECT_NE(std::string::npos,
+                      asm_text.find("    .section .text\n"));
+            EXPECT_NE(std::string::npos, asm_text.find("    .globl main\n"));
+            EXPECT_NE(std::string::npos, asm_text.find("main:\n"));
+            EXPECT_NE(std::string::npos, asm_text.find(".Lmain_exit:\n"));
+        }
     }
 }
 

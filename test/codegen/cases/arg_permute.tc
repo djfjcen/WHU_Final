@@ -1,0 +1,14 @@
+int combine(int a, int b, int c, int d) {
+    if (a < 0) {
+        return 0;
+    }
+    return a * 3 + b * 5 + c * 7 + d * 11;
+}
+
+int permute(int a, int b, int c, int d) {
+    return combine(d, c, b, a);
+}
+
+int main() {
+    return permute(1, 2, 3, 4);
+}

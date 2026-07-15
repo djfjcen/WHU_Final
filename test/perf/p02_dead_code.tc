@@ -1,0 +1,1 @@
+int main() { int x = 7; int dead = x * 999 + 17; return x + 1; }

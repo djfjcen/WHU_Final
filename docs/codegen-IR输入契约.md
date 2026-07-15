@@ -68,18 +68,14 @@ for (const auto& function : module.functions()) {
 
 当前 IR 没有数组、结构体、浮点、真实源语言指针。所有 `ptr` 都可以按 i32 地址处理。
 
-## O2 满分路径备注
+## 优化路径约束
 
-`Module` 是正式 codegen 的输入，但 `-opt` 不一定必须从 `Module` 直接逐条翻译到汇编。ToyC 是闭世界、无输入语言，`main()` 的返回值可以通过 AST/Sema 或 IR 的整程序求值在编译期得到。若求值成功，codegen 可以直接输出常量返回汇编。
-
-因此后续性能路径建议允许两种输入消费方式：
+`Module` 是正式 codegen 的唯一输入。`-opt` 可以改变 `Module` 的内部形态，但必须先经过 IRGen，并保持源程序的通用语义。禁止通过 AST/Sema 解释执行整个程序、预先计算 `main()` 最终返回值或构造替代原程序的最小模块。
 
 | 路径 | 输入 | 输出 |
 |---|---|---|
-| 整程序求值 | AST + `SemaResult`，或 `Module` | 常量返回汇编 |
-| 常规后端 | raw / mem2reg / optim 后的 `Module` | 完整 RV32IM 汇编 |
-
-常规后端仍必须存在，作为求值失败、调试和报告说明的 fallback。
+| 普通后端 | raw `Module` | 完整 RV32IM 汇编 |
+| 优化后端 | mem2reg / optim 后的 `Module` | 完整 RV32IM 汇编 |
 
 ## 当前 IR 阶段形态
 
