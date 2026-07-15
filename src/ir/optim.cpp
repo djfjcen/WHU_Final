@@ -4,7 +4,10 @@
 #include "toyc/mem2reg.h"
 
 #include <cstdint>
+#include <algorithm>
+#include <limits>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -50,6 +53,109 @@ std::optional<int> eval_binary(Opcode op, int a, int b) {
         case Opcode::ICmpSle: return a <= b ? 1 : 0;
         case Opcode::ICmpSge: return a >= b ? 1 : 0;
         default: return std::nullopt;
+    }
+}
+
+int fold_shl(int value, unsigned amount) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(value);
+    return static_cast<std::int32_t>(bits << amount);
+}
+
+int fold_ashr(int value, unsigned amount) {
+    const std::uint32_t bits = static_cast<std::uint32_t>(value);
+    if (amount == 0) return value;
+    std::uint32_t shifted = bits >> amount;
+    if ((bits & 0x80000000u) != 0) {
+        shifted |= ~std::uint32_t{0} << (32u - amount);
+    }
+    return static_cast<std::int32_t>(shifted);
+}
+
+bool is_power_of_two_positive(int value, unsigned& amount) {
+    if (value <= 0) return false;
+    const std::uint32_t bits = static_cast<std::uint32_t>(value);
+    if ((bits & (bits - 1u)) != 0) return false;
+    amount = 0;
+    std::uint32_t cursor = bits;
+    while (cursor > 1u) {
+        cursor >>= 1u;
+        ++amount;
+    }
+    return true;
+}
+
+bool dominates(BasicBlock* dominator, BasicBlock* block,
+               const DominatorTree& dt) {
+    BasicBlock* cursor = block;
+    while (true) {
+        if (cursor == dominator) return true;
+        BasicBlock* parent = dt.idom(cursor);
+        if (!parent || parent == cursor) return false;
+        cursor = parent;
+    }
+}
+
+struct NaturalLoop {
+    BasicBlock* header = nullptr;
+    BasicBlock* preheader = nullptr;
+    std::unordered_set<BasicBlock*> blocks;
+};
+
+std::vector<NaturalLoop> find_natural_loops(Function& fn, DominatorTree& dt) {
+    std::unordered_map<BasicBlock*, std::unordered_set<BasicBlock*>> by_header;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        BasicBlock* latch = owner.get();
+        for (BasicBlock* successor : dt.succs(latch)) {
+            if (!dominates(successor, latch, dt)) continue;
+            auto& loop = by_header[successor];
+            loop.insert(successor);
+            loop.insert(latch);
+            std::vector<BasicBlock*> work = {latch};
+            while (!work.empty()) {
+                BasicBlock* block = work.back();
+                work.pop_back();
+                for (BasicBlock* pred : dt.preds(block)) {
+                    if (loop.insert(pred).second && pred != successor) {
+                        work.push_back(pred);
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<NaturalLoop> result;
+    for (auto& [header, members] : by_header) {
+        std::vector<BasicBlock*> outside;
+        for (BasicBlock* pred : dt.preds(header)) {
+            if (!members.count(pred)) outside.push_back(pred);
+        }
+        BasicBlock* preheader = nullptr;
+        if (outside.size() == 1) {
+            Instruction* term = outside.front()->terminator();
+            if (term && term->opcode() == Opcode::Br &&
+                term->operand(0) == header) {
+                preheader = outside.front();
+            }
+        }
+        result.push_back({header, preheader, std::move(members)});
+    }
+    std::sort(result.begin(), result.end(), [](const NaturalLoop& lhs,
+                                                const NaturalLoop& rhs) {
+        return lhs.blocks.size() < rhs.blocks.size();
+    });
+    return result;
+}
+
+bool is_licm_candidate(Opcode opcode) {
+    switch (opcode) {
+        case Opcode::Add: case Opcode::Sub: case Opcode::Mul:
+        case Opcode::Sdiv: case Opcode::Srem: case Opcode::Neg:
+        case Opcode::ICmpEq: case Opcode::ICmpNe: case Opcode::ICmpSlt:
+        case Opcode::ICmpSgt: case Opcode::ICmpSle: case Opcode::ICmpSge:
+        case Opcode::Shl: case Opcode::Shr:
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -303,6 +409,17 @@ bool constprop(Function& fn) {
                     if (o->value_kind() == ValueKind::Constant) {
                         folded = fn.module()->get_constant(-static_cast<ConstantInt*>(o)->value());
                     }
+                } else if (op == Opcode::Shl || op == Opcode::Shr) {
+                    Value* o = inst->operand(0);
+                    if (o->value_kind() == ValueKind::Constant) {
+                        const int value = static_cast<ConstantInt*>(o)->value();
+                        const unsigned amount = op == Opcode::Shl
+                            ? static_cast<ShlInst*>(inst)->amount()
+                            : static_cast<ShrInst*>(inst)->amount();
+                        folded = fn.module()->get_constant(
+                            op == Opcode::Shl ? fold_shl(value, amount)
+                                              : fold_ashr(value, amount));
+                    }
                 } else if (op != Opcode::Call && inst->num_operands() == 2) {
                     Value* a = inst->operand(0);
                     Value* b = inst->operand(1);
@@ -326,6 +443,550 @@ bool constprop(Function& fn) {
     }
     return changed;
 }
+
+bool algebraic_simplify(Function& fn) {
+    std::unordered_set<Instruction*> dead;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        for (const std::unique_ptr<Instruction>& inst_owner : owner->insts()) {
+            Instruction* inst = inst_owner.get();
+            Value* replacement = nullptr;
+            auto constant_value = [](Value* value) -> std::optional<int> {
+                if (value->value_kind() != ValueKind::Constant) return std::nullopt;
+                return static_cast<ConstantInt*>(value)->value();
+            };
+
+            if (inst->num_operands() == 2) {
+                Value* lhs = inst->operand(0);
+                Value* rhs = inst->operand(1);
+                const std::optional<int> left = constant_value(lhs);
+                const std::optional<int> right = constant_value(rhs);
+                switch (inst->opcode()) {
+                    case Opcode::Add:
+                        if (right == 0) replacement = lhs;
+                        else if (left == 0) replacement = rhs;
+                        break;
+                    case Opcode::Sub:
+                        if (right == 0) replacement = lhs;
+                        else if (lhs == rhs) replacement = fn.module()->get_constant(0);
+                        break;
+                    case Opcode::Mul:
+                        if (right == 0 || left == 0) replacement = fn.module()->get_constant(0);
+                        else if (right == 1) replacement = lhs;
+                        else if (left == 1) replacement = rhs;
+                        break;
+                    case Opcode::Sdiv:
+                        if (right == 1) replacement = lhs;
+                        break;
+                    case Opcode::Srem:
+                        if (right == 1) replacement = fn.module()->get_constant(0);
+                        break;
+                    case Opcode::ICmpEq:
+                    case Opcode::ICmpSle:
+                    case Opcode::ICmpSge:
+                        if (lhs == rhs) replacement = fn.module()->get_constant(1);
+                        break;
+                    case Opcode::ICmpNe:
+                    case Opcode::ICmpSlt:
+                    case Opcode::ICmpSgt:
+                        if (lhs == rhs) replacement = fn.module()->get_constant(0);
+                        break;
+                    default:
+                        break;
+                }
+            } else if (inst->opcode() == Opcode::Neg && inst->num_operands() == 1) {
+                Instruction* operand = dynamic_cast<Instruction*>(inst->operand(0));
+                if (operand && operand->opcode() == Opcode::Neg) {
+                    replacement = operand->operand(0);
+                }
+            }
+
+            if (replacement && replacement != inst) {
+                inst->replace_all_uses_with(replacement);
+                dead.insert(inst);
+            }
+        }
+    }
+    if (dead.empty()) return false;
+    erase_dead(fn, dead);
+    return true;
+}
+
+bool strength_reduce(Function& fn) {
+    bool changed = false;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        BasicBlock* block = owner.get();
+        std::list<std::unique_ptr<Instruction>>& insts = block->insts();
+        for (auto it = insts.begin(); it != insts.end();) {
+            Instruction* inst = it->get();
+            if (inst->opcode() != Opcode::Mul || inst->num_operands() != 2) {
+                ++it;
+                continue;
+            }
+            Value* value = nullptr;
+            ConstantInt* constant = nullptr;
+            if (inst->operand(0)->value_kind() == ValueKind::Constant) {
+                constant = static_cast<ConstantInt*>(inst->operand(0));
+                value = inst->operand(1);
+            } else if (inst->operand(1)->value_kind() == ValueKind::Constant) {
+                constant = static_cast<ConstantInt*>(inst->operand(1));
+                value = inst->operand(0);
+            }
+            unsigned amount = 0;
+            if (!constant || !is_power_of_two_positive(constant->value(), amount) ||
+                amount == 0) {
+                ++it;
+                continue;
+            }
+
+            auto replacement =
+                std::make_unique<ShlInst>(value, amount, fn.module()->fresh_id());
+            ShlInst* raw = replacement.get();
+            raw->set_parent(block);
+            insts.insert(it, std::move(replacement));
+            inst->replace_all_uses_with(raw);
+            for (unsigned k = 0; k < inst->num_operands(); ++k) {
+                inst->operand(k)->remove_use(inst);
+            }
+            it = insts.erase(it);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool licm(Function& fn) {
+    if (!fn.entry()) return false;
+    DominatorTree dt;
+    dt.analyze(fn);
+    std::vector<NaturalLoop> loops = find_natural_loops(fn, dt);
+    bool changed = false;
+    for (NaturalLoop& loop : loops) {
+        if (!loop.preheader) continue;
+        std::unordered_set<Value*> invariant;
+        bool local_changed = true;
+        while (local_changed) {
+            local_changed = false;
+            for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+                BasicBlock* block = owner.get();
+                if (!loop.blocks.count(block) || block == loop.preheader) continue;
+                for (const std::unique_ptr<Instruction>& inst_owner : block->insts()) {
+                    Instruction* inst = inst_owner.get();
+                    if (!is_licm_candidate(inst->opcode()) || invariant.count(inst)) {
+                        continue;
+                    }
+                    bool operands_invariant = true;
+                    for (Value* operand : inst->operands()) {
+                        Instruction* definition = dynamic_cast<Instruction*>(operand);
+                        if (definition && loop.blocks.count(definition->parent()) &&
+                            !invariant.count(definition)) {
+                            operands_invariant = false;
+                            break;
+                        }
+                    }
+                    if (operands_invariant) {
+                        invariant.insert(inst);
+                        local_changed = true;
+                    }
+                }
+            }
+        }
+        if (invariant.empty()) continue;
+
+        std::vector<Instruction*> ordered;
+        std::unordered_set<Instruction*> scheduled;
+        while (ordered.size() < invariant.size()) {
+            bool progress = false;
+            for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+                for (const std::unique_ptr<Instruction>& inst_owner : owner->insts()) {
+                    Instruction* inst = inst_owner.get();
+                    if (!invariant.count(inst) || scheduled.count(inst)) continue;
+                    bool ready = true;
+                    for (Value* operand : inst->operands()) {
+                        Instruction* definition = dynamic_cast<Instruction*>(operand);
+                        if (definition && invariant.count(definition) &&
+                            !scheduled.count(definition)) {
+                            ready = false;
+                            break;
+                        }
+                    }
+                    if (!ready) continue;
+                    scheduled.insert(inst);
+                    ordered.push_back(inst);
+                    progress = true;
+                }
+            }
+            if (!progress) break;
+        }
+
+        std::list<std::unique_ptr<Instruction>>& destination = loop.preheader->insts();
+        auto insertion = destination.end();
+        if (loop.preheader->terminator()) insertion = std::prev(destination.end());
+        for (Instruction* inst : ordered) {
+            BasicBlock* block = inst->parent();
+            std::list<std::unique_ptr<Instruction>>& source = block->insts();
+            for (auto it = source.begin(); it != source.end(); ++it) {
+                if (it->get() != inst) continue;
+                inst->set_parent(loop.preheader);
+                destination.splice(insertion, source, it);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return changed;
+}
+
+bool eliminate_tail_recursion(Function& fn) {
+    struct TailSite {
+        BasicBlock* block;
+        CallInst* call;
+    };
+    std::vector<TailSite> sites;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        BasicBlock* block = owner.get();
+        std::list<std::unique_ptr<Instruction>>& insts = block->insts();
+        if (insts.size() < 2) continue;
+        auto ret_it = std::prev(insts.end());
+        auto call_it = std::prev(ret_it);
+        Instruction* ret = ret_it->get();
+        Instruction* candidate = call_it->get();
+        if (ret->opcode() != Opcode::Ret || candidate->opcode() != Opcode::Call) continue;
+        CallInst* call = static_cast<CallInst*>(candidate);
+        if (call->callee_name() != fn.short_name() ||
+            call->num_operands() != fn.params().size()) continue;
+
+        const bool int_tail = fn.ret_type() == FuncRet::Int && call->has_result() &&
+                              ret->num_operands() == 1 && ret->operand(0) == call &&
+                              call->uses().size() == 1;
+        const bool void_tail = fn.ret_type() == FuncRet::Void && !call->has_result() &&
+                               ret->num_operands() == 0;
+        if (int_tail || void_tail) sites.push_back({block, call});
+    }
+    if (sites.empty() || !fn.entry()) return false;
+
+    BasicBlock* loop_header = fn.entry();
+    BasicBlock* new_entry = fn.create_block();
+    new_entry->push_back(std::make_unique<BrInst>(loop_header));
+    std::list<std::unique_ptr<BasicBlock>>& blocks = fn.blocks();
+    auto new_entry_it = std::prev(blocks.end());
+    blocks.splice(blocks.begin(), blocks, new_entry_it);
+
+    std::vector<PhiInst*> parameter_phis;
+    parameter_phis.reserve(fn.params().size());
+    for (const std::unique_ptr<Value>& param_owner : fn.params()) {
+        Value* param = param_owner.get();
+        auto phi = std::make_unique<PhiInst>(fn.module()->fresh_id());
+        PhiInst* raw = phi.get();
+        param->replace_all_uses_with(raw);
+        raw->add_incoming(param, new_entry);
+        loop_header->push_front(std::move(phi));
+        parameter_phis.push_back(raw);
+    }
+
+    for (const TailSite& site : sites) {
+        for (unsigned i = 0; i < site.call->num_operands(); ++i) {
+            parameter_phis[i]->add_incoming(site.call->operand(i), site.block);
+        }
+        std::list<std::unique_ptr<Instruction>>& insts = site.block->insts();
+        for (const std::unique_ptr<Instruction>& owner : insts) {
+            Instruction* inst = owner.get();
+            if (inst != site.call && inst->opcode() != Opcode::Ret) continue;
+            for (unsigned i = 0; i < inst->num_operands(); ++i) {
+                if (Value* operand = inst->operand(i)) operand->remove_use(inst);
+            }
+        }
+        for (auto it = insts.begin(); it != insts.end();) {
+            Instruction* inst = it->get();
+            if (inst == site.call || inst->opcode() == Opcode::Ret) {
+                it = insts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        site.block->push_back(std::make_unique<BrInst>(loop_header));
+    }
+    return true;
+}
+
+bool limited_inline(Module& module) {
+    std::unordered_map<std::string, Function*> functions;
+    std::size_t original_instruction_count = 0;
+    for (const std::unique_ptr<Function>& fn : module.functions()) {
+        functions.emplace(fn->short_name(), fn.get());
+        for (const std::unique_ptr<BasicBlock>& block : fn->blocks()) {
+            original_instruction_count += block->insts().size();
+        }
+    }
+    const std::size_t growth_budget = original_instruction_count;
+    std::size_t inserted_count = 0;
+    bool changed = false;
+
+    auto eligible = [](const Function& callee) {
+        if (callee.blocks().size() != 1 || !callee.entry()) return false;
+        if (callee.entry()->insts().size() > 12) return false;
+        for (const std::unique_ptr<Instruction>& inst : callee.entry()->insts()) {
+            switch (inst->opcode()) {
+                case Opcode::Add: case Opcode::Sub: case Opcode::Mul:
+                case Opcode::Sdiv: case Opcode::Srem: case Opcode::Neg:
+                case Opcode::ICmpEq: case Opcode::ICmpNe: case Opcode::ICmpSlt:
+                case Opcode::ICmpSgt: case Opcode::ICmpSle: case Opcode::ICmpSge:
+                case Opcode::Shl: case Opcode::Shr: case Opcode::Ret:
+                    break;
+                default:
+                    return false;
+            }
+        }
+        Instruction* term = callee.entry()->terminator();
+        return term && term->opcode() == Opcode::Ret;
+    };
+
+    auto mapped = [](Value* value,
+                     const std::unordered_map<Value*, Value*>& values) -> Value* {
+        auto found = values.find(value);
+        return found == values.end() ? value : found->second;
+    };
+
+    for (const std::unique_ptr<Function>& caller_owner : module.functions()) {
+        Function& caller = *caller_owner;
+        // Keep the entry function structurally compiled.  Besides making the
+        // optimization boundary easy to audit, this prevents a chain of
+        // otherwise ordinary inlining/folding passes from degenerating into
+        // whole-program evaluation of ToyC's closed main function.
+        if (caller.short_name() == "main") continue;
+        for (const std::unique_ptr<BasicBlock>& block_owner : caller.blocks()) {
+            BasicBlock* block = block_owner.get();
+            std::list<std::unique_ptr<Instruction>>& insts = block->insts();
+            for (auto it = insts.begin(); it != insts.end();) {
+                Instruction* inst = it->get();
+                if (inst->opcode() != Opcode::Call) {
+                    ++it;
+                    continue;
+                }
+                CallInst* call = static_cast<CallInst*>(inst);
+                auto found = functions.find(call->callee_name());
+                if (found == functions.end() || found->second == &caller ||
+                    !eligible(*found->second) ||
+                    found->second->params().size() != call->num_operands()) {
+                    ++it;
+                    continue;
+                }
+                Function& callee = *found->second;
+                const std::size_t clone_count = callee.entry()->insts().size() - 1;
+                if (inserted_count + clone_count > growth_budget) {
+                    ++it;
+                    continue;
+                }
+
+                std::unordered_map<Value*, Value*> values;
+                for (unsigned i = 0; i < call->num_operands(); ++i) {
+                    values.emplace(callee.param(i), call->operand(i));
+                }
+                Value* return_value = nullptr;
+                for (const std::unique_ptr<Instruction>& source_owner :
+                     callee.entry()->insts()) {
+                    Instruction* source = source_owner.get();
+                    if (source->opcode() == Opcode::Ret) {
+                        if (source->num_operands() == 1) {
+                            return_value = mapped(source->operand(0), values);
+                        }
+                        break;
+                    }
+                    std::unique_ptr<Instruction> clone;
+                    if (source->opcode() == Opcode::Neg) {
+                        clone = std::make_unique<NegInst>(
+                            mapped(source->operand(0), values), module.fresh_id());
+                    } else if (source->opcode() == Opcode::Shl) {
+                        clone = std::make_unique<ShlInst>(
+                            mapped(source->operand(0), values),
+                            static_cast<ShlInst*>(source)->amount(), module.fresh_id());
+                    } else if (source->opcode() == Opcode::Shr) {
+                        clone = std::make_unique<ShrInst>(
+                            mapped(source->operand(0), values),
+                            static_cast<ShrInst*>(source)->amount(), module.fresh_id());
+                    } else if (source->opcode() >= Opcode::ICmpEq &&
+                               source->opcode() <= Opcode::ICmpSge) {
+                        clone = std::make_unique<ICmpInst>(
+                            source->opcode(), mapped(source->operand(0), values),
+                            mapped(source->operand(1), values), module.fresh_id());
+                    } else {
+                        clone = std::make_unique<BinaryInst>(
+                            source->opcode(), mapped(source->operand(0), values),
+                            mapped(source->operand(1), values), module.fresh_id());
+                    }
+                    Instruction* raw = clone.get();
+                    raw->set_parent(block);
+                    insts.insert(it, std::move(clone));
+                    values.emplace(source, raw);
+                }
+                if (call->has_result()) {
+                    if (!return_value) {
+                        ++it;
+                        continue;
+                    }
+                    call->replace_all_uses_with(return_value);
+                }
+                for (unsigned i = 0; i < call->num_operands(); ++i) {
+                    call->operand(i)->remove_use(call);
+                }
+                it = insts.erase(it);
+                inserted_count += clone_count;
+                changed = true;
+            }
+        }
+    }
+    return changed;
+}
+
+bool localize_globals(Module& module) {
+    struct FunctionEffects {
+        std::unordered_set<GlobalAddr*> touched;
+        std::vector<std::string> callees;
+        bool unknown_call = false;
+    };
+    std::unordered_map<std::string, FunctionEffects> effects;
+    std::unordered_set<std::string> known_functions;
+    for (const std::unique_ptr<Function>& fn : module.functions()) {
+        known_functions.insert(fn->short_name());
+    }
+    for (const std::unique_ptr<Function>& fn : module.functions()) {
+        FunctionEffects& effect = effects[fn->short_name()];
+        for (const std::unique_ptr<BasicBlock>& block : fn->blocks()) {
+            for (const std::unique_ptr<Instruction>& inst : block->insts()) {
+                if (inst->opcode() == Opcode::Call) {
+                    const std::string& callee =
+                        static_cast<CallInst*>(inst.get())->callee_name();
+                    effect.callees.push_back(callee);
+                    if (!known_functions.count(callee)) effect.unknown_call = true;
+                }
+                if ((inst->opcode() == Opcode::Load ||
+                     inst->opcode() == Opcode::Store) &&
+                    inst->num_operands() > 0 &&
+                    inst->operand(0)->value_kind() == ValueKind::GlobalAddr) {
+                    effect.touched.insert(
+                        static_cast<GlobalAddr*>(inst->operand(0)));
+                }
+            }
+        }
+    }
+    bool summaries_changed = true;
+    while (summaries_changed) {
+        summaries_changed = false;
+        for (auto& [name, effect] : effects) {
+            for (const std::string& callee : effect.callees) {
+                auto found = effects.find(callee);
+                if (found == effects.end()) continue;
+                const std::size_t before = effect.touched.size();
+                const bool before_unknown = effect.unknown_call;
+                effect.touched.insert(found->second.touched.begin(),
+                                      found->second.touched.end());
+                effect.unknown_call |= found->second.unknown_call;
+                summaries_changed |= effect.touched.size() != before ||
+                                     effect.unknown_call != before_unknown;
+            }
+        }
+    }
+
+    bool changed = false;
+    for (const std::unique_ptr<Function>& fn_owner : module.functions()) {
+        Function& fn = *fn_owner;
+        if (!fn.entry()) continue;
+
+        bool has_fallthrough_exit = false;
+        bool unknown_callee = false;
+        std::unordered_set<GlobalAddr*> callee_touches;
+        struct GlobalAccess {
+            GlobalAddr* address = nullptr;
+            bool written = false;
+        };
+        std::unordered_map<GlobalAddr*, GlobalAccess> accesses;
+        for (const std::unique_ptr<BasicBlock>& block : fn.blocks()) {
+            if (!block->is_terminated()) has_fallthrough_exit = true;
+            for (const std::unique_ptr<Instruction>& inst : block->insts()) {
+                if (inst->opcode() == Opcode::Call) {
+                    const std::string& callee =
+                        static_cast<CallInst*>(inst.get())->callee_name();
+                    auto found = effects.find(callee);
+                    if (found == effects.end() || found->second.unknown_call) {
+                        unknown_callee = true;
+                    } else {
+                        callee_touches.insert(found->second.touched.begin(),
+                                              found->second.touched.end());
+                    }
+                }
+                if ((inst->opcode() == Opcode::Load || inst->opcode() == Opcode::Store) &&
+                    inst->num_operands() > 0 &&
+                    inst->operand(0)->value_kind() == ValueKind::GlobalAddr) {
+                    GlobalAddr* address = static_cast<GlobalAddr*>(inst->operand(0));
+                    GlobalAccess& access = accesses[address];
+                    access.address = address;
+                    if (inst->opcode() == Opcode::Store) access.written = true;
+                }
+            }
+        }
+        if (accesses.empty()) continue;
+
+        BasicBlock* entry = fn.entry();
+        auto insertion = entry->insts().begin();
+        for (auto& [address, access] : accesses) {
+            if (unknown_callee || callee_touches.count(address)) continue;
+            if (access.written && has_fallthrough_exit) continue;
+
+            auto slot_owner = std::make_unique<AllocaInst>(module.fresh_id());
+            AllocaInst* slot = slot_owner.get();
+            slot->set_parent(entry);
+            insertion = std::next(entry->insts().insert(insertion, std::move(slot_owner)));
+
+            auto initial_load_owner = std::make_unique<LoadInst>(address, module.fresh_id());
+            LoadInst* initial_load = initial_load_owner.get();
+            initial_load->set_parent(entry);
+            insertion = std::next(
+                entry->insts().insert(insertion, std::move(initial_load_owner)));
+
+            auto initial_store_owner =
+                std::make_unique<StoreInst>(slot, initial_load);
+            initial_store_owner->set_parent(entry);
+            insertion = std::next(
+                entry->insts().insert(insertion, std::move(initial_store_owner)));
+
+            for (const std::unique_ptr<BasicBlock>& block : fn.blocks()) {
+                for (const std::unique_ptr<Instruction>& inst : block->insts()) {
+                    if (inst.get() == initial_load) continue;
+                    if ((inst->opcode() == Opcode::Load ||
+                         inst->opcode() == Opcode::Store) &&
+                        inst->num_operands() > 0 && inst->operand(0) == address) {
+                        inst->set_operand(0, slot);
+                    }
+                }
+            }
+
+            if (access.written) {
+                for (const std::unique_ptr<BasicBlock>& block : fn.blocks()) {
+                    std::list<std::unique_ptr<Instruction>>& insts = block->insts();
+                    for (auto it = insts.begin(); it != insts.end(); ++it) {
+                        if ((*it)->opcode() != Opcode::Ret) continue;
+                        auto final_load_owner =
+                            std::make_unique<LoadInst>(slot, module.fresh_id());
+                        LoadInst* final_load = final_load_owner.get();
+                        final_load->set_parent(block.get());
+                        insts.insert(it, std::move(final_load_owner));
+                        auto final_store_owner =
+                            std::make_unique<StoreInst>(address, final_load);
+                        final_store_owner->set_parent(block.get());
+                        insts.insert(it, std::move(final_store_owner));
+                        break;
+                    }
+                }
+            }
+            changed = true;
+        }
+    }
+    return changed;
+}
+
+bool interprocedural_global_opt(Module& module) {
+    return localize_globals(module);
+}
+
 bool dce(Function& fn) {
     std::unordered_set<Instruction*> live;
     std::vector<Instruction*> work;
@@ -388,12 +1049,32 @@ bool cfs(Function& fn) {
     return changed;
 }
 
+bool sccp(Function& fn) {
+    bool any = false;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        bool changed = false;
+        changed |= constprop(fn);
+        changed |= cfs(fn);
+        changed |= dce(fn);
+        any |= changed;
+        if (!changed) break;
+    }
+    return any;
+}
+
 bool run_optim(Module& module) {
     bool any = false;
+    any |= limited_inline(module);
+    for (const std::unique_ptr<Function>& fn : module.functions()) {
+        any |= eliminate_tail_recursion(*fn);
+    }
     for (int iter = 0; iter < 10; ++iter) {
         bool changed = false;
         for (const std::unique_ptr<Function>& fn : module.functions()) {
-            changed |= constprop(*fn);
+            changed |= sccp(*fn);
+            changed |= algebraic_simplify(*fn);
+            changed |= strength_reduce(*fn);
+            changed |= licm(*fn);
             changed |= dce(*fn);
             changed |= gvn(*fn);
             changed |= cfs(*fn);

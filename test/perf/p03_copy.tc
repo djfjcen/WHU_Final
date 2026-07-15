@@ -1,0 +1,1 @@
+int main() { int a = 11; int b = a; int c = b; int d = c; return d; }

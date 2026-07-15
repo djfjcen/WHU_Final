@@ -1,0 +1,7 @@
+int mix(int x) {
+    return x / 8 + x % 8 + x / 16 + x % 16;
+}
+
+int main() {
+    return mix(-123) - mix(123) + 200;
+}

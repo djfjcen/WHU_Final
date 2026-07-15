@@ -1,0 +1,1 @@
+int main() { int i = 0; int a = 1; int b = 3; while (i < 8000) { a = a + b * 8; b = b + i % 8; i = i + 1; } return a + b; }
