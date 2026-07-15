@@ -1,5 +1,6 @@
 #include "toyc/optim.h"
 
+#include "toyc/const_eval.h"
 #include "toyc/ir.h"
 #include "toyc/mem2reg.h"
 
@@ -378,8 +379,9 @@ bool cfs_merge_blocks(Function& fn) {
 
 }  // namespace
 
-// Filled in by Tasks 2-5; wired by Task 6.
 bool constprop(Function& fn) {
+    ConstChecker checker(*fn.module());
+    ConstEvaluator evaluator(*fn.module(), checker);
     bool changed = false;
     bool local_changed = true;
     while (local_changed) {

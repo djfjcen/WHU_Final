@@ -342,6 +342,7 @@ public:
         functions_.push_back(std::move(f));
         return raw;
     }
+    const Function* find_function(const std::string& name) const;
     const std::vector<std::unique_ptr<Function>>& functions() const { return functions_; }
 
 private:
