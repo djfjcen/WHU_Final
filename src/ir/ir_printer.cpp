@@ -36,7 +36,7 @@ void print_instruction(const Instruction& inst, std::ostream& out) {
             print_operand(inst.operand(1), out);
             break;
         case Opcode::Add: case Opcode::Sub: case Opcode::Mul:
-        case Opcode::Sdiv: case Opcode::Srem:
+        case Opcode::Sdiv: case Opcode::Srem: case Opcode::And:
             out << opcode_name(inst.opcode()) << " ";
             print_operand(inst.operand(0), out);
             out << ", ";

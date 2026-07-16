@@ -52,6 +52,7 @@ std::optional<int> eval_binary(Opcode op, int a, int b) {
         case Opcode::ICmpSgt: return a > b ? 1 : 0;
         case Opcode::ICmpSle: return a <= b ? 1 : 0;
         case Opcode::ICmpSge: return a >= b ? 1 : 0;
+        case Opcode::And: return a & b;
         default: return std::nullopt;
     }
 }
@@ -152,7 +153,7 @@ bool is_licm_candidate(Opcode opcode) {
         case Opcode::Sdiv: case Opcode::Srem: case Opcode::Neg:
         case Opcode::ICmpEq: case Opcode::ICmpNe: case Opcode::ICmpSlt:
         case Opcode::ICmpSgt: case Opcode::ICmpSle: case Opcode::ICmpSge:
-        case Opcode::Shl: case Opcode::Shr:
+        case Opcode::Shl: case Opcode::Shr: case Opcode::And:
             return true;
         default:
             return false;
@@ -179,7 +180,7 @@ bool gvn_cseable(Opcode op) {
         case Opcode::Sdiv: case Opcode::Srem:
         case Opcode::ICmpEq: case Opcode::ICmpNe: case Opcode::ICmpSlt:
         case Opcode::ICmpSgt: case Opcode::ICmpSle: case Opcode::ICmpSge:
-        case Opcode::Neg:
+        case Opcode::Neg: case Opcode::And:
             return true;
         default:
             return false;
@@ -657,20 +658,13 @@ bool strength_reduce_divrem(Function& fn) {
                 replacement = shr.get();
                 replacement->set_parent(block);
                 insts.insert(it, std::move(shr));
-            } else {
-                auto shr = std::make_unique<ShrInst>(dividend, amount, fn.module()->fresh_id());
-                ShrInst* shr_raw = shr.get();
-                shr_raw->set_parent(block);
-                insts.insert(it, std::move(shr));
-                auto shl = std::make_unique<ShlInst>(shr_raw, amount, fn.module()->fresh_id());
-                ShlInst* shl_raw = shl.get();
-                shl_raw->set_parent(block);
-                insts.insert(it, std::move(shl));
-                auto sub = std::make_unique<BinaryInst>(Opcode::Sub, dividend, shl_raw,
-                                                        fn.module()->fresh_id());
-                replacement = sub.get();
+            } else {  // Srem: a % 2^k == a & (2^k - 1) for a >= 0
+                ConstantInt* mask = fn.module()->get_constant((1 << amount) - 1);
+                auto bit_and = std::make_unique<BinaryInst>(Opcode::And, dividend, mask,
+                                                            fn.module()->fresh_id());
+                replacement = bit_and.get();
                 replacement->set_parent(block);
-                insts.insert(it, std::move(sub));
+                insts.insert(it, std::move(bit_and));
             }
             inst->replace_all_uses_with(replacement);
             for (unsigned k = 0; k < inst->num_operands(); ++k) {

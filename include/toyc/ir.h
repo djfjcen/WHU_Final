@@ -96,6 +96,7 @@ enum class Opcode {
     Br, CondBr, Ret, Call,
     Phi,
     Shl, Shr,  // introduced only by optimization (design §7/§8.6)
+    And,       // introduced only by optimization (bitmask for non-negative % 2^k)
 };
 const char* opcode_name(Opcode opcode);
 

@@ -237,6 +237,7 @@ private:
     case Opcode::Srem:
     case Opcode::Shl:
     case Opcode::Shr:
+    case Opcode::And:
       return lower_binary(inst);
     case Opcode::Neg:
       return lower_neg(inst);
@@ -356,6 +357,8 @@ private:
       writer_.inst("div", reg_name(destination), reg_name(lhs), reg_name(rhs));
     } else if (inst.opcode() == Opcode::Srem) {
       writer_.inst("rem", reg_name(destination), reg_name(lhs), reg_name(rhs));
+    } else if (inst.opcode() == Opcode::And) {
+      writer_.inst("and", reg_name(destination), reg_name(lhs), reg_name(rhs));
     }
     return spill_result(inst, destination);
   }
@@ -1021,6 +1024,31 @@ private:
   }
 
   bool try_lower_immediate_binary(const Instruction &inst) {
+    if (inst.opcode() == Opcode::And) {
+      // `and` is commutative; an i12 immediate is sign-extended by `andi`, so
+      // it is exact whenever the constant fits the signed 12-bit range.
+      Value *var = inst.operand(0);
+      Value *cst = inst.operand(1);
+      if (var->value_kind() == ValueKind::Constant &&
+          cst->value_kind() != ValueKind::Constant) {
+        std::swap(var, cst);
+      }
+      if (cst->value_kind() != ValueKind::Constant) {
+        return false;
+      }
+      const int imm = static_cast<const ConstantInt *>(cst)->value();
+      if (!fits_i12(imm)) {
+        return false;
+      }
+      RvReg source = RvReg::T0;
+      if (!select_i32_register(var, RvReg::T0, source)) {
+        return false;
+      }
+      const RvReg destination = result_register(inst, RvReg::T2);
+      writer_.inst("andi", reg_name(destination), reg_name(source),
+                   std::to_string(imm));
+      return spill_result(inst, destination);
+    }
     if (inst.opcode() != Opcode::Add && inst.opcode() != Opcode::Sub) {
       return false;
     }

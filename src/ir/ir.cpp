@@ -93,6 +93,7 @@ const char* opcode_name(Opcode opcode) {
         case Opcode::Phi: return "phi";
         case Opcode::Shl: return "shl";
         case Opcode::Shr: return "shr";
+        case Opcode::And: return "and";
     }
     return "?";
 }
