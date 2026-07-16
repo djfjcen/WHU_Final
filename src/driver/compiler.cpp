@@ -5,6 +5,7 @@
 #include "toyc/diagnostics.h"
 #include "toyc/ir.h"
 #include "toyc/ir_printer.h"
+#include "toyc/inliner.h"
 #include "toyc/irgen.h"
 #include "toyc/lexer.h"
 #include "toyc/mem2reg.h"
@@ -32,6 +33,7 @@ std::unique_ptr<Module> build_ir(const CompUnit& unit,
     if (options.opt_mode || options.mem2reg_only) {
         if (options.opt_mode) {
             interprocedural_global_opt(*ir);
+            inline_functions(*ir);
         }
         mem2reg(*ir);
     }

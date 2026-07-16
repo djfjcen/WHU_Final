@@ -61,6 +61,7 @@ add_library(toyc-core
     src/ir/ir_printer.cpp
     src/ir/ir_builder.cpp
     src/ir/irgen.cpp
+    src/ir/inliner.cpp
     src/ir/mem2reg.cpp
     src/ir/optim.cpp
     src/codegen/asm_writer.cpp
