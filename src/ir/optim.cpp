@@ -553,6 +553,136 @@ bool strength_reduce(Function& fn) {
     return changed;
 }
 
+// Prove that a phi is a monotonically increasing counter that provably stays in
+// [0, INT_MAX] (so `phi % 2^k` / `phi / 2^k` can drop the signed-correction
+// dance).  Conservative: any pattern we cannot fully certify is rejected.
+//   * exactly two incomings: a non-negative constant `init` and `phi + step`
+//     (step a positive constant) coming back on the loop backedge;
+//   * a guard `ICmpSlt(phi, N)` (N a constant, N + step cannot overflow) whose
+//     CondBr true-target is uniquely entered from the guard and dominates the
+//     block that computes `phi + step`.  Then the increment only ever runs with
+//     phi < N, so phi stays within [0, N-1+step] ⊆ [0, INT_MAX].
+bool is_nonneg_counter_phi(PhiInst* phi, const DominatorTree& dt) {
+    if (phi->num_operands() != 2 || phi->incoming_blocks().size() != 2) return false;
+
+    ConstantInt* init = nullptr;
+    Instruction* step_add = nullptr;
+    long step = 0;
+    for (unsigned i = 0; i < 2; ++i) {
+        Value* v = phi->operand(i);
+        if (v->value_kind() == ValueKind::Constant) {
+            ConstantInt* c = static_cast<ConstantInt*>(v);
+            if (c->value() < 0 || init) return false;
+            init = c;
+        } else {
+            Instruction* add = dynamic_cast<Instruction*>(v);
+            if (!add || add->opcode() != Opcode::Add || add->num_operands() != 2) return false;
+            ConstantInt* sc = nullptr;
+            if (add->operand(0) == phi && add->operand(1)->value_kind() == ValueKind::Constant) {
+                sc = static_cast<ConstantInt*>(add->operand(1));
+            } else if (add->operand(1) == phi &&
+                       add->operand(0)->value_kind() == ValueKind::Constant) {
+                sc = static_cast<ConstantInt*>(add->operand(0));
+            }
+            if (!sc || sc->value() < 1 || step_add) return false;
+            step_add = add;
+            step = sc->value();
+        }
+    }
+    if (!init || !step_add || !step_add->parent()) return false;
+    BasicBlock* add_block = step_add->parent();
+
+    for (User* u : phi->uses()) {
+        Instruction* cmp = dynamic_cast<Instruction*>(u);
+        if (!cmp || cmp->opcode() != Opcode::ICmpSlt || cmp->operand(0) != phi) continue;
+        Value* bound = cmp->operand(1);
+        if (bound->value_kind() != ValueKind::Constant) continue;
+        const long n = static_cast<ConstantInt*>(bound)->value();
+        if (n < 0 || n > static_cast<long>(std::numeric_limits<int>::max()) - step) continue;
+        for (User* cu : cmp->uses()) {
+            Instruction* br = dynamic_cast<Instruction*>(cu);
+            if (!br || br->opcode() != Opcode::CondBr) continue;
+            BasicBlock* true_target = static_cast<BasicBlock*>(br->operand(1));
+            const std::vector<BasicBlock*>& tp = dt.preds(true_target);
+            if (tp.size() != 1 || tp[0] != br->parent()) continue;
+            if (dominates(true_target, add_block, dt)) return true;
+        }
+    }
+    return false;
+}
+
+bool is_known_nonneg(Value* v, const DominatorTree& dt) {
+    if (v->value_kind() == ValueKind::Constant) {
+        return static_cast<ConstantInt*>(v)->value() >= 0;
+    }
+    Instruction* inst = dynamic_cast<Instruction*>(v);
+    if (inst && inst->opcode() == Opcode::Phi) {
+        return is_nonneg_counter_phi(static_cast<PhiInst*>(inst), dt);
+    }
+    return false;
+}
+
+// For a provably non-negative dividend, `a / 2^k` == `a >> k` and
+// `a % 2^k` == `a - ((a >> k) << k)`, avoiding the signed remainder correction
+// (~6 instructions) that codegen otherwise emits.  Uses only existing opcodes,
+// so no codegen changes are needed.  The CFG is untouched, so `dt` stays valid.
+bool strength_reduce_divrem(Function& fn) {
+    if (!fn.entry()) return false;
+    DominatorTree dt;
+    dt.analyze(fn);
+    bool changed = false;
+    for (const std::unique_ptr<BasicBlock>& owner : fn.blocks()) {
+        BasicBlock* block = owner.get();
+        std::list<std::unique_ptr<Instruction>>& insts = block->insts();
+        for (auto it = insts.begin(); it != insts.end();) {
+            Instruction* inst = it->get();
+            const Opcode op = inst->opcode();
+            if ((op != Opcode::Sdiv && op != Opcode::Srem) || inst->num_operands() != 2) {
+                ++it;
+                continue;
+            }
+            Value* dividend = inst->operand(0);
+            Value* divisor = inst->operand(1);
+            unsigned amount = 0;
+            if (divisor->value_kind() != ValueKind::Constant ||
+                !is_power_of_two_positive(static_cast<ConstantInt*>(divisor)->value(), amount) ||
+                amount == 0 || !is_known_nonneg(dividend, dt)) {
+                ++it;
+                continue;
+            }
+
+            Instruction* replacement = nullptr;
+            if (op == Opcode::Sdiv) {
+                auto shr = std::make_unique<ShrInst>(dividend, amount, fn.module()->fresh_id());
+                replacement = shr.get();
+                replacement->set_parent(block);
+                insts.insert(it, std::move(shr));
+            } else {
+                auto shr = std::make_unique<ShrInst>(dividend, amount, fn.module()->fresh_id());
+                ShrInst* shr_raw = shr.get();
+                shr_raw->set_parent(block);
+                insts.insert(it, std::move(shr));
+                auto shl = std::make_unique<ShlInst>(shr_raw, amount, fn.module()->fresh_id());
+                ShlInst* shl_raw = shl.get();
+                shl_raw->set_parent(block);
+                insts.insert(it, std::move(shl));
+                auto sub = std::make_unique<BinaryInst>(Opcode::Sub, dividend, shl_raw,
+                                                        fn.module()->fresh_id());
+                replacement = sub.get();
+                replacement->set_parent(block);
+                insts.insert(it, std::move(sub));
+            }
+            inst->replace_all_uses_with(replacement);
+            for (unsigned k = 0; k < inst->num_operands(); ++k) {
+                inst->operand(k)->remove_use(inst);
+            }
+            it = insts.erase(it);
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 bool licm(Function& fn) {
     if (!fn.entry()) return false;
     DominatorTree dt;
@@ -1073,6 +1203,7 @@ bool run_optim(Module& module) {
             changed |= sccp(*fn);
             changed |= algebraic_simplify(*fn);
             changed |= strength_reduce(*fn);
+            changed |= strength_reduce_divrem(*fn);
             changed |= licm(*fn);
             changed |= dce(*fn);
             changed |= gvn(*fn);
