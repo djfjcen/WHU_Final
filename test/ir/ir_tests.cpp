@@ -483,10 +483,9 @@ TEST(ConstProp, SkipsDivZero) {
     EXPECT_EQ(2u, entry->insts().size());
 }
 
-TEST(ConstProp, KeepsCall) {
-    // An int-returning call with two constant operands must NOT be folded: it
-    // reaches the binary-fold branch by operand count, but Call is not a binary
-    // arithmetic/compare op. Guards the explicit Call exclusion in constprop.
+TEST(ConstProp, KeepsUnknownCall) {
+    // A call is folded only after its target is found and checked. An unknown
+    // external target must stay available for runtime lowering.
     Module m;
     Function* f = m.create_function("f", FuncRet::Int, 0);
     BasicBlock* entry = f->create_block();

@@ -57,20 +57,27 @@ run_and_capture_status() {
 
 for source in "${cases_dir}"/*.tc; do
     name="$(basename "${source}" .tc)"
-    asm_file="${work_dir}/${name}.s"
-    toyc_bin="${work_dir}/${name}.toyc"
     gcc_bin_out="${work_dir}/${name}.gcc"
 
-    "${compiler}" < "${source}" > "${asm_file}"
-    "${gcc_bin}" "${common_flags[@]}" -Wl,-e,main -x assembler "${asm_file}" -o "${toyc_bin}"
     "${gcc_bin}" "${common_flags[@]}" -Wl,-e,_start -x assembler "${start_file}" \
         -x c "${source}" -x none -o "${gcc_bin_out}"
-
-    toyc_status="$(run_and_capture_status "${toyc_bin}")"
     gcc_status="$(run_and_capture_status "${gcc_bin_out}")"
-    if [[ "${toyc_status}" != "${gcc_status}" ]]; then
-        echo "FAIL ${name}: toyc exit ${toyc_status}, gcc exit ${gcc_status}"
-        exit 1
-    fi
-    echo "ok ${name}: exit ${toyc_status}"
+
+    for mode in raw opt; do
+        compiler_flags=()
+        if [[ "${mode}" == opt ]]; then
+            compiler_flags=(-opt)
+        fi
+        asm_file="${work_dir}/${name}.${mode}.s"
+        toyc_bin="${work_dir}/${name}.${mode}.toyc"
+        "${compiler}" "${compiler_flags[@]}" < "${source}" > "${asm_file}"
+        "${gcc_bin}" "${common_flags[@]}" -Wl,-e,main -x assembler \
+            "${asm_file}" -o "${toyc_bin}"
+        toyc_status="$(run_and_capture_status "${toyc_bin}")"
+        if [[ "${toyc_status}" != "${gcc_status}" ]]; then
+            echo "FAIL ${name} (${mode}): toyc exit ${toyc_status}, gcc exit ${gcc_status}"
+            exit 1
+        fi
+        echo "ok ${name} (${mode}): exit ${toyc_status}"
+    done
 done

@@ -1,0 +1,2 @@
+const int a = 3; const int b = a * 8; const int c = b + a; const int d = c * 16; const int e = d / 8;
+int main() { return e + c + b + a; }

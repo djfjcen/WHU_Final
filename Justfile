@@ -57,6 +57,12 @@ oracle-codegen: build
 oracle-codegen-docker:
     test/codegen/run_codegen_oracle_docker.sh
 
+perf-oracle:
+    test/perf/run_perf_oracle.sh
+
+perf-oracle-docker:
+    docker run --rm -v "$(pwd):/work" -w /work whu-compiler-riscv-oracle:latest bash -lc 'TOYC_BUILD_DIR=build-oracle test/perf/run_perf_oracle.sh'
+
 coverage: configure-coverage
     cmake --build {{build_dir}} --target coverage
 
